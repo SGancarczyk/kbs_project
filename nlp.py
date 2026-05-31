@@ -12,6 +12,47 @@ import re
 NEGATION_WORDS = {"not", "no", "dont", "don't", "avoid", "without", "except", "never", "exclude", "hate", "skip"}
 NEGATION_CONNECTORS = {"or", "and", "nor"}
 
+# ----------------------------------------------------------------------------
+# INFORMAL-PHRASE NORMALIZATION (runs BEFORE tokenization).
+# The tokenizer + spell corrector are good at single mistyped words, but they
+# cannot expand chat shorthand like "wanna" (one token that should become two
+# words) or symbols like "&" / "w/". Those slip through because they are not
+# typos of any vocabulary word - they are different tokens entirely. So we do a
+# cheap regex pass on the RAW sentence first, rewriting common informal inputs
+# into their plain-English form. Everything downstream (tokenize, lemmatize,
+# vocabulary matching, negation) then benefits automatically.
+# ----------------------------------------------------------------------------
+# Word-shaped replacements: \b...\b makes sure we only swap WHOLE words, so
+# "u" -> "you" never touches "blue", and "bc" never touches "abcdef".
+_INFORMAL_WORD_REPLACEMENTS = [
+    (r"\bwanna\b", "want to"),
+    (r"\bgonna\b", "going to"),
+    (r"\bgotta\b", "got to"),
+    (r"\bsmth\b", "something"),
+    (r"\bpls\b", "please"),
+    (r"\bplz\b", "please"),
+    (r"\bu\b", "you"),
+    (r"\bbc\b", "because"),
+    (r"\bcuz\b", "because"),
+    (r"\bcoz\b", "because"),
+]
+
+
+def _normalize_common_phrases(text):
+    # Expand chat shorthand into plain English. Order matters for the symbol
+    # rules: "w/o" (without) must be handled BEFORE "w/" (with), otherwise the
+    # "w/" rule would fire first and leave a stray "o" behind.
+    result = text
+    for pattern, replacement in _INFORMAL_WORD_REPLACEMENTS:
+        # re.IGNORECASE so "Wanna" and "WANNA" are both caught.
+        result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+    # Symbol-based shorthand. These are plain substring swaps because regex word
+    # boundaries (\b) do not behave intuitively next to "/" and "&".
+    result = result.replace("w/o", "without").replace("W/o", "without").replace("W/O", "without")
+    result = result.replace("w/", "with").replace("W/", "with")
+    result = result.replace("&", " and ")
+    return result
+
 
 def normalize(text):
     # Lowercase and replace punctuation with spaces so "South-America" and
@@ -130,6 +171,12 @@ def extract(text, keyword_map, allow_spellcheck=True, blocking_vocabulary=None):
     # contains keywords from all other slots; it prevents negation from leaking
     # across categories, e.g. "not expensive, South America" should not exclude
     # South America when we are extracting regions.
+    #
+    # FIRST clean up informal shorthand ("wanna", "&", "w/o", ...) on the raw
+    # sentence, so the tokenizer and every matcher below see plain English. We do
+    # this here (not in the chatbot) so EVERY call to extract() benefits, no
+    # matter which slot/vocabulary it is run for.
+    text = _normalize_common_phrases(text)
     raw_tokens = tokenize(text)
     lemma_tokens = [lemmatize(t) for t in raw_tokens]
     vocabulary = set(keyword_map.keys())

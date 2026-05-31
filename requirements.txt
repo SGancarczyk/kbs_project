@@ -1,0 +1,8 @@
+# Python dependencies for the Travel Destination chatbot.
+#
+# The CORE system (CLI via main.py, NLP, fuzzy logic, inference, tests) needs
+# NO external libraries - it runs on the Python standard library alone.
+#
+# The ONLY external dependency is Streamlit, used solely by the optional GUI
+# (app.py). Install it with:  pip install -r requirements.txt
+streamlit>=1.30
