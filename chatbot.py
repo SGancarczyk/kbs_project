@@ -14,7 +14,11 @@ import inference as inf
 # Words that mean "I have no preference for the thing you just asked" - they let
 # the user SKIP a slot instead of being forced to answer (un-menu-like).
 SKIP_WORDS = {"any", "anywhere", "whatever", "skip", "none", "no", "nope", "idk", "anything"}
-SKIP_PHRASES = {"doesn't matter", "does not matter", "dont care", "don't care", "do not care", "no preference", "not sure"}
+SKIP_PHRASES = {"doesn't matter", "does not matter", "dont care", "don't care", "do not care", "no preference", "not sure",
+                # Apostrophe-free / texting variants so casual phrasing still
+                # registers as "no preference" instead of confusing the bot.
+                "doesnt matter", "doesnt", "dnt care", "dnt matter",
+                "idgaf", "idc", "no pref", "np"}
 
 # ----------------------------------------------------------------------------
 # Cues that signal the user is REJECTING a city we just recommended (used by the
@@ -201,6 +205,12 @@ class TravelChatbot:
     def _is_skip(self, text):
         # True if the whole message means "no preference here".
         t = text.lower().strip()
+        # Run the SAME informal-shorthand normalization the NLP layer uses BEFORE
+        # matching, so casual variants are folded into their plain-English form
+        # (e.g. "dont care" stays caught, and any shorthand the table expands no
+        # longer slips past the skip check). This keeps skip detection in sync
+        # with how preferences are parsed everywhere else.
+        t = nlp._normalize_common_phrases(t)
         if t in SKIP_PHRASES:
             return True
         tokens = t.split()
@@ -388,26 +398,55 @@ class TravelChatbot:
         # list. We copy `out` but swap in the filtered results.
         self.last_results = dict(out)
         self.last_results["results"] = results
-        lines = []
-        # Surface the forward-chaining advisories first, if any fired.
-        for msg in out["advisories"]:
-            lines.append("Heads up: " + msg)
+        # EMPTY / NO-MATCH state stays a PLAIN STRING (not a dict). Callers and
+        # the GUI treat any string as ordinary chat text, so error/empty replies
+        # keep rendering exactly as before. Only a successful list of picks is
+        # returned as the structured dict below.
         if not results:
+            lines = []
+            for msg in out["advisories"]:
+                lines.append("Heads up: " + msg)
             lines.append("I couldn't find anything matching all of that. Try relaxing one wish - "
                          "remove a region, widen the budget, or drop the climate. (type 'restart' to redo)")
             return "\n".join(lines)
-        # Conversational header (RESPONSE TYPE 10), e.g.
-        # "Here are your top picks — chosen from 312 destinations that match your region:"
-        lines.append("Here are your top picks — chosen from " + str(out["pool_size"]) + " destinations that match your region:")
+        # SUCCESS: build a STRUCTURED payload instead of one big string, so the
+        # GUI can lay each pick out as its own card and the CLI can still render
+        # it as text (via render_response_text()). Each card carries the already
+        # computed numbers so neither front end has to recompute anything.
+        cards = []
         rank = 1
         for conf, dest, score in results:
-            header = ("#" + str(rank) + " " + dest["city"] + ", " + dest["country"] + " (" + dest["region"] + ", " + str(dest["avg_temp_yearly"]) + "C, " + dest["budget_level"] + ")")
-            lines.append(header)
-            lines.append("   " + inf.explain(dest, score, self.query))
-            lines.append("   " + dest["short_description"])
+            # Rebuild the per-criterion evidence breakdown (same content as
+            # inference.explain) but WITHOUT the leading "confidence .. |" and the
+            # "strong on .." tail, because we expose those as separate fields.
+            parts = []
+            for name, (membership, cf) in score["details"].items():
+                sign = "+" if cf >= 0 else ""
+                parts.append(name + " " + str(round(membership, 2)) + " (cf " + sign + str(round(cf, 2)) + ")")
+            explanation = ", ".join(parts) if parts else "no preferences given yet"
+            # Lifestyle dimensions the CITY itself scores highly on (>=4), so the
+            # card can show "Strong on: nature, cuisine" regardless of the query.
+            strong_on = [dim for dim in kb.LIFESTYLE_DIMENSIONS if dest.get(dim, 0) >= 4]
+            cards.append({
+                "rank": rank,
+                "city": dest["city"],
+                "country": dest["country"],
+                "region": dest["region"],
+                "temp": str(dest["avg_temp_yearly"]) + "C",
+                "budget": dest["budget_level"],
+                "confidence": round(conf, 2),
+                "explanation": explanation,
+                "description": dest["short_description"],
+                "strong_on": strong_on,
+            })
             rank += 1
-        lines.append("Type 'why' for the reasoning, 'restart' to search again, or 'exit' to leave.")
-        return "\n".join(lines)
+        return {
+            "type": "recommendations",
+            "advisories": list(out["advisories"]),
+            "header": "Here are your top picks — chosen from " + str(out["pool_size"]) + " destinations that match your region:",
+            "results": cards,
+            "footer": "Type 'why' for the reasoning, 'restart' to search again, or 'exit' to leave.",
+        }
     def _explain_last(self):
         # The "why" intent: a deeper reasoning breakdown of the last picks
         # (RESPONSE TYPE 12). If we have not recommended yet, say so.
@@ -418,10 +457,23 @@ class TravelChatbot:
             comps = ", ".join(name + " m=" + str(round(m, 2)) + "/cf=" + ("+" if cf >= 0 else "") + str(round(cf, 2)) for name, (m, cf) in score["details"].items()) or "no criteria given"
             lines.append(dest["city"] + ": " + comps + " -> confidence " + str(round(conf, 2)))
         return "\n".join(lines)
+    def _lead(self, message, payload):
+        # Attach a short conversational lead-in (e.g. "No problem.",
+        # "Got it, I've removed Paris.") to a recommendation reply. Because
+        # _format_recommendation() can now return EITHER a structured dict (on
+        # success) OR a plain string (empty/no-match), we handle both: for a dict
+        # we tuck the lead into a "lead" field the front ends render above the
+        # cards; for a string we simply prepend it as before.
+        if isinstance(payload, dict):
+            payload = dict(payload)          # copy so we never mutate cached state
+            payload["lead"] = message
+            return payload
+        return message + "\n" + payload
     def respond(self, text):
-        # THE MAIN ENTRY POINT. Given one user message, return the bot's reply as
-        # a string. Keeping all logic here (and returning a string) makes the bot
-        # easy to test automatically by feeding it a scripted conversation.
+        # THE MAIN ENTRY POINT. Given one user message, return the bot's reply.
+        # The reply is normally a STRING, but a successful recommendation is a
+        # STRUCTURED dict (see _format_recommendation) so the GUI can render
+        # cards; the CLI converts it back to text via render_response_text().
         if not text or not text.strip():
             return "Go ahead - tell me about your trip, or type 'help'."
         intent = self._detect_intent(text)
@@ -448,22 +500,22 @@ class TravelChatbot:
             for city in rejected:
                 self.rejected_cities.add(city)
             removed = _join_natural(rejected)
-            return ("Got it, I've removed " + removed + ". Here are updated picks:\n"
-                    + self._format_recommendation())
+            return self._lead("Got it, I've removed " + removed + ". Here are updated picks:",
+                              self._format_recommendation())
         # intent == "provide": the user is giving preferences (the common case).
         # 'skip all' -> stop asking the rest and recommend with what we have.
         if self._is_skip_all(text):
             for slot, _q in self._slots():
                 self.resolved.add(slot)
             self.pending_slot = None
-            return "Sure - skipping the rest and using what I have so far.\n" + self._format_recommendation()  # RESPONSE TYPE 19 (skip-all)
+            return self._lead("Sure - skipping the rest and using what I have so far.", self._format_recommendation())  # RESPONSE TYPE 19 (skip-all)
         # If this message is a pure "skip" and we just asked a question, mark
         # that one slot resolved so we move on instead of nagging.
         if self._is_skip(text) and self.pending_slot is not None:
             self.resolved.add(self.pending_slot)
             nxt = self._next_question()
             if nxt is None:
-                return "No problem.\n" + self._format_recommendation()
+                return self._lead("No problem.", self._format_recommendation())
             return "No problem, skipping that. (say 'skip all' to skip the rest)\n" + nxt   # RESPONSE TYPE 18 (skip ack)
         # Otherwise, fill whatever slots the sentence contains.
         changed = self._update_slots(text)
@@ -478,6 +530,32 @@ class TravelChatbot:
                     "food, nature, or nightlife. Or type 'go' for picks with what I have.")  # RESPONSE TYPE 9
         nxt = self._next_question()
         if nxt is None:
-            # We have enough - recommend right away.
-            return ack + "\n" + self._format_recommendation()
+            # We have enough - recommend right away (ack becomes the lead-in).
+            return self._lead(ack, self._format_recommendation())
         return ack + "\n" + nxt
+
+
+def render_response_text(reply):
+    # Convert ANY respond() return value into plain text. Most replies are
+    # already strings and pass straight through; a structured recommendation
+    # payload (dict) is flattened back into the same readable layout the CLI
+    # always used. This lets main.py stay a simple `print(...)` loop while the
+    # GUI consumes the rich dict directly.
+    if not isinstance(reply, dict) or reply.get("type") != "recommendations":
+        return reply
+    lines = []
+    # Optional conversational lead-in (skip-all / reject / ack), if present.
+    if reply.get("lead"):
+        lines.append(reply["lead"])
+    # Forward-chaining advisories first, mirroring the old output.
+    for msg in reply.get("advisories", []):
+        lines.append("Heads up: " + msg)
+    lines.append(reply["header"])
+    for r in reply["results"]:
+        lines.append("#" + str(r["rank"]) + " " + r["city"] + ", " + r["country"]
+                     + " (" + r["region"] + ", " + r["temp"] + ", " + r["budget"] + ")")
+        strong = (" | strong on " + ", ".join(r["strong_on"])) if r["strong_on"] else ""
+        lines.append("   confidence " + str(r["confidence"]) + " | " + r["explanation"] + strong)
+        lines.append("   " + r["description"])
+    lines.append(reply["footer"])
+    return "\n".join(lines)

@@ -44,13 +44,61 @@ def init_session():
         st.session_state.history.append(("bot", greeting))
 
 
+def render_recommendations(payload):
+    # Draw a successful recommendation as a set of CARDS instead of a wall of
+    # text. The payload is the structured dict returned by the chatbot
+    # (type == "recommendations"). We render it inside the assistant chat bubble.
+    with st.chat_message("assistant"):
+        # Optional conversational lead-in ("No problem.", "Got it, I've removed
+        # Paris.", or the natural acknowledgement) shown above everything else.
+        if payload.get("lead"):
+            st.markdown(payload["lead"])
+        # Forward-chaining advisories become prominent warning banners.
+        for advisory in payload.get("advisories", []):
+            st.warning(advisory)
+        # The header is shown as bold intro text above the cards.
+        st.markdown("**" + payload["header"] + "**")
+        for result in payload["results"]:
+            # st.container(border=True) gives each pick a subtle boxed card.
+            with st.container(border=True):
+                # Top row: title on the left, a confidence metric on the right.
+                title_col, score_col = st.columns([5, 2])
+                with title_col:
+                    st.markdown("**#" + str(result["rank"]) + " "
+                                + result["city"] + ", " + result["country"] + "**")
+                    # region (prettified) · temperature · budget level
+                    st.caption(result["region"].replace("_", " ").title()
+                               + "  ·  " + result["temp"]
+                               + "  ·  " + result["budget"])
+                with score_col:
+                    # Confidence in [-1, 1]; show it plainly so it is honest even
+                    # when the match is weak/negative.
+                    st.metric("Confidence", f"{result['confidence']:.2f}")
+                # The human-readable blurb about the city.
+                st.write(result["description"])
+                # What the city itself is strongest on (lifestyle scores >= 4).
+                if result["strong_on"]:
+                    st.markdown("**Strong on:** " + ", ".join(result["strong_on"]))
+                # The certainty-factor breakdown, tucked away to keep cards clean.
+                with st.expander("Why this pick?"):
+                    st.write(result["explanation"])
+        # The footer (commands hint) as a quiet caption under the cards.
+        st.caption(payload["footer"])
+
+
 def render_message(role, message):
-    # Draw one chat bubble. Requirement: user on the RIGHT, bot on the LEFT.
-    # Streamlit stacks vertically by default, so we fake left/right alignment by
-    # placing each bubble in a wide/narrow column pair. The bot's multi-line
-    # replies use single "\n" newlines; in Markdown a single newline collapses
-    # to a space, so we convert each "\n" into "  \n" (two trailing spaces),
-    # which Markdown renders as a real line break - keeping the picks readable.
+    # Draw one chat entry. A recommendation is a structured dict -> render cards;
+    # everything else is plain text rendered as a chat bubble.
+    # Requirement: user on the RIGHT, bot on the LEFT. Streamlit stacks
+    # vertically by default, so we fake left/right alignment by placing each
+    # text bubble in a wide/narrow column pair.
+    if isinstance(message, dict) and message.get("type") == "recommendations":
+        # Cards already live in an assistant bubble (left-aligned, full width).
+        render_recommendations(message)
+        return
+    # The bot's multi-line replies use single "\n" newlines; in Markdown a single
+    # newline collapses to a space, so we convert each "\n" into "  \n" (two
+    # trailing spaces), which Markdown renders as a real line break.
     pretty = message.replace("\n", "  \n")
     if role == "user":
         # Narrow empty column on the left pushes the bubble to the right.
