@@ -8,7 +8,7 @@
 # inference, chatbot), which keeps responsibilities cleanly separated.
 # ----------------------------------------------------------------------------
 import knowledge_base as kb
-from chatbot import TravelChatbot
+from chatbot import TravelChatbot, render_response_text
 def run():
     # Load all destinations once at start-up.
     destinations = kb.load_destinations()
@@ -24,8 +24,10 @@ def run():
             # If input ends (Ctrl-D) or is interrupted (Ctrl-C), exit cleanly.
             print("\nGoodbye!")
             break
-        # Ask the bot for its reply and print it.
-        print(bot.respond(user_text))
+        # Ask the bot for its reply and print it. A successful recommendation
+        # comes back as a structured dict, so we flatten it to text for the
+        # terminal; every other reply is already a plain string.
+        print(render_response_text(bot.respond(user_text)))
 # Standard Python idiom: only run when this file is executed directly, not when
 # it is imported by another module (e.g. by the tests).
 if __name__ == "__main__":

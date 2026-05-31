@@ -118,11 +118,15 @@ check("fallback still returns results", len(fb["results"]) == 3)
 check("budget guard: unknown level -> 0.0 (no crash)", fuzzy.budget_membership("Budget", "Unknown") == 0.0)
 check("duration guard: unknown duration -> 0.0 (no crash)", fuzzy.duration_membership(["One week"], "Unknown") == 0.0)
 print("=== 8. CHATBOT: 'skip all' jumps straight to recommendations ===")
-from chatbot import TravelChatbot
+from chatbot import TravelChatbot, render_response_text
 bot = TravelChatbot(dests)
 bot.respond("europe")
 reply = bot.respond("skip all")
-check("'skip all' produces recommendations", "picks" in reply or "top" in reply)
+# A successful recommendation is now a structured dict (so the GUI can render
+# cards); error/empty replies remain plain strings.
+check("'skip all' produces recommendations", isinstance(reply, dict) and reply.get("type") == "recommendations")
+check("'skip all' recommendation has 5 result cards", isinstance(reply, dict) and len(reply["results"]) == 5)
+check("recommendation text renders 'top picks' for the CLI", "top picks" in render_response_text(reply))
 check("expanded vocab: country name 'japan' -> asia", nlp.extract("i want to visit japan", kb.CONTINENT_SYNONYMS)["include"] == ["asia"])
 check("expanded vocab: 'temples' lemmatised -> culture", "culture" in nlp.extract("i love ancient temples", kb.LIFESTYLE_SYNONYMS)["include"])
 
