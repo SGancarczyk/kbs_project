@@ -15,6 +15,65 @@ import inference as inf
 # the user SKIP a slot instead of being forced to answer (un-menu-like).
 SKIP_WORDS = {"any", "anywhere", "whatever", "skip", "none", "no", "nope", "idk", "anything"}
 SKIP_PHRASES = {"doesn't matter", "does not matter", "dont care", "don't care", "do not care", "no preference", "not sure"}
+
+# ----------------------------------------------------------------------------
+# Cues that signal the user is REJECTING a city we just recommended (used by the
+# "reject_city" intent). We only treat a message as a rejection when one of
+# these appears AND it points at a city that is currently on screen, so a normal
+# preference like "warm" is never mistaken for a rejection.
+REJECTION_CUES = ("not ", "no ", "remove", "don't want", "dont want",
+                  "do not want", "without", "exclude", "skip", "drop",
+                  "rather not", "get rid", "anything but", "take out",
+                  "i hate", "lose the")
+
+# Map a positional phrase the user might type ("the first one", "the top pick")
+# onto an index into the list of currently shown recommendations. "last" is
+# resolved separately because its index depends on how many picks are shown.
+_POSITION_WORDS = {
+    "first": 0, "top": 0, "1st": 0, "one": 0,
+    "second": 1, "2nd": 1,
+    "third": 2, "3rd": 2,
+    "fourth": 3, "4th": 3,
+    "fifth": 4, "5th": 4,
+}
+
+# Human-friendly phrasings used by the rewritten, more natural _acknowledge().
+# We keep the dataset's exact labels on the left and a conversational phrase on
+# the right, so confirmations read like a person talking rather than a form.
+_BUDGET_PHRASES = {
+    "Budget": "on a budget",
+    "Mid-range": "mid-range",
+    "Luxury": "luxury",
+}
+_DURATION_PHRASES = {
+    "Day trip": "a day trip",
+    "Weekend": "a weekend getaway",
+    "Short trip": "a short trip",
+    "One week": "a week-long trip",
+    "Long trip": "a long trip",
+}
+# Rotating openers so repeated confirmations do not all sound identical.
+_ACK_OPENERS = ["Perfect!", "Got it!", "Sure thing —", "Noted —",
+                "Great choice —", "Awesome —", "Love it —"]
+
+
+def _pretty_region(region):
+    # Turn a stored region key like "north_america" into "North America" for
+    # display. Underscores become spaces and each word is capitalised.
+    return region.replace("_", " ").title()
+
+
+def _join_natural(items):
+    # Join a list into natural English: ["a"] -> "a"; ["a","b"] -> "a and b";
+    # ["a","b","c"] -> "a, b, and c". Used everywhere we list things to the user.
+    items = list(items)
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return items[0] + " and " + items[1]
+    return ", ".join(items[:-1]) + ", and " + items[-1]
 class TravelChatbot:
     def __init__(self, destinations):
         # Keep a reference to the Knowledge Base (the 560 destinations) and start
@@ -41,6 +100,14 @@ class TravelChatbot:
         self.pending_slot = None     # the slot we asked about most recently
         self.last_results = None     # remember the last recommendation for "why"
         self.finished = False        # set True when the user wants to quit
+        # MEMORY of cities the user has told us to drop. Once a city is in here
+        # it is filtered out of every future recommendation for this session, so
+        # the user never has to reject the same place twice. Cleared on restart
+        # because reset() rebuilds it as an empty set.
+        self.rejected_cities = set()
+        # Counter used to rotate the friendly openers in _acknowledge() so the
+        # confirmations vary instead of always starting the same way.
+        self._ack_index = 0
     # --- The ordered list of slots the bot tries to fill, each with a question.
     # A slot counts as "done" when its part of the query is filled or skipped.
     def _slots(self):
@@ -93,8 +160,44 @@ class TravelChatbot:
             return "recommend"
         if t in {"hi", "hello", "hey", "selam", "yo"}:
             return "greet"
+        # REJECTION: only possible once we have actually shown some picks. We
+        # require a rejection cue ("not", "remove", ...) AND that it points at a
+        # city/position currently on screen, so an ordinary preference such as
+        # "warm" is never misread as "remove a city".
+        if self.last_results and self.last_results.get("results"):
+            if self._has_rejection_cue(t) and self._cities_to_reject(text):
+                return "reject_city"
         # Anything else is treated as the user giving us preferences.
         return "provide"
+    def _has_rejection_cue(self, t):
+        # True if the (already lowercased) message contains any phrase that
+        # signals the user wants something taken off the list.
+        return any(cue in t for cue in REJECTION_CUES)
+    def _cities_to_reject(self, text):
+        # Work out WHICH currently-shown cities the message refers to. We only
+        # ever look at the picks we last displayed (self.last_results), which is
+        # exactly the list the user can see, so references stay unambiguous.
+        if not self.last_results or not self.last_results.get("results"):
+            return []
+        t = text.lower()
+        shown = [dest["city"] for _, dest, _ in self.last_results["results"]]
+        to_reject = []
+        # "exclude those cities" / "none of these" / "drop all of them" -> the
+        # user is rejecting the WHOLE current list at once.
+        if "those" in t or "these" in t or "all of them" in t or "all of these" in t:
+            return list(shown)
+        # Positional references like "not the first one" / "remove the top pick".
+        for word, idx in _POSITION_WORDS.items():
+            if word in t and idx < len(shown) and shown[idx] not in to_reject:
+                to_reject.append(shown[idx])
+        # "the last one" -> the final pick on screen.
+        if "last" in t and shown and shown[-1] not in to_reject:
+            to_reject.append(shown[-1])
+        # Direct city-name mentions ("not Paris", "remove Barcelona").
+        for city in shown:
+            if city.lower() in t and city not in to_reject:
+                to_reject.append(city)
+        return to_reject
     def _is_skip(self, text):
         # True if the whole message means "no preference here".
         t = text.lower().strip()
@@ -203,32 +306,52 @@ class TravelChatbot:
                 self.query["lifestyle_exclude"].append(v)
                 changed["lifestyle_exclude"].append(v)
         return changed
+    def _next_opener(self):
+        # Pick the next rotating opener (e.g. "Perfect!", "Noted —") and advance
+        # the counter, wrapping around. Rotating instead of random keeps the
+        # behaviour deterministic (nice for tests) while still feeling varied.
+        opener = _ACK_OPENERS[self._ack_index % len(_ACK_OPENERS)]
+        self._ack_index += 1
+        return opener
     def _acknowledge(self, changed):
-        # Build the "Got it" line summarising what we just understood.
-        pieces = []
+        # Build a SHORT, NATURAL confirmation of what we just understood, e.g.
+        # "Perfect! Europe, on a budget, and you enjoy culture and food."
+        # The old version printed a robotic "regions: europe; budget: Budget.";
+        # here we translate each slot value into everyday English and stitch the
+        # clauses together with proper commas/"and".
+        clauses = []
+        # --- positive wishes (what the user DOES want) ---
         if changed["regions_include"]:
-            pieces.append("regions: " + ", ".join(changed["regions_include"]))
-        if changed["regions_exclude"]:
-            pieces.append("avoiding regions: " + ", ".join(changed["regions_exclude"]))
-        if changed["duration"]:
-            pieces.append("duration: " + ", ".join(changed["duration"]))
-        if changed["duration_exclude"]:
-            pieces.append("avoiding durations: " + ", ".join(changed["duration_exclude"]))
+            # Proper-case the regions so they read like place names.
+            clauses.append(_join_natural([_pretty_region(r) for r in changed["regions_include"]]))
         if changed["budget"]:
-            pieces.append("budget: " + ", ".join(changed["budget"]))
-        if changed["budget_exclude"]:
-            pieces.append("avoiding budget levels: " + ", ".join(changed["budget_exclude"]))
+            # "Budget" -> "on a budget", "Luxury" -> "luxury", etc.
+            clauses.append(_join_natural([_BUDGET_PHRASES.get(b, b.lower()) for b in changed["budget"]]))
         if changed["climate"]:
-            pieces.append("climate: " + ", ".join(changed["climate"]))
-        if changed["climate_exclude"]:
-            pieces.append("avoiding climates: " + ", ".join(changed["climate_exclude"]))
+            # "warm" -> "warm climate" so the slot is unambiguous.
+            clauses.append(_join_natural([c + " climate" for c in changed["climate"]]))
+        if changed["duration"]:
+            clauses.append(_join_natural([_DURATION_PHRASES.get(d, d.lower()) for d in changed["duration"]]))
         if changed["lifestyle"]:
-            pieces.append("interests: " + ", ".join(changed["lifestyle"]))
+            # Interests are already plain words ("culture", "food"-ish).
+            clauses.append("you enjoy " + _join_natural(changed["lifestyle"]))
+        # --- exclusions (what the user does NOT want) ---
+        if changed["regions_exclude"]:
+            clauses.append("not " + _join_natural([_pretty_region(r) for r in changed["regions_exclude"]]))
+        if changed["budget_exclude"]:
+            clauses.append("nothing " + _join_natural([_BUDGET_PHRASES.get(b, b.lower()) for b in changed["budget_exclude"]]))
+        if changed["climate_exclude"]:
+            clauses.append("avoiding " + _join_natural(changed["climate_exclude"]) + " weather")
+        if changed["duration_exclude"]:
+            clauses.append("not " + _join_natural([_DURATION_PHRASES.get(d, d.lower()) for d in changed["duration_exclude"]]))
         if changed["lifestyle_exclude"]:
-            pieces.append("avoiding interests: " + ", ".join(changed["lifestyle_exclude"]))
-        if not pieces:
+            clauses.append("steering clear of " + _join_natural(changed["lifestyle_exclude"]))
+        # Nothing recognised -> signal the caller to ask for clarification.
+        if not clauses:
             return None
-        return "Got it - " + "; ".join(pieces) + "."
+        # Opener + the natural list of clauses, e.g.
+        # "Noted — mid-range, warm climate, and you enjoy culture and food."
+        return self._next_opener() + " " + _join_natural(clauses) + "."
     def _next_question(self):
         # Find the first slot that is neither filled nor skipped, remember it as
         # the pending slot, and return its question. If everything is handled,
@@ -248,19 +371,36 @@ class TravelChatbot:
             self.last_results = None
             return ("I need at least one preference before I can make a meaningful recommendation. "
                     "Tell me a region, budget, climate, trip length, interest, or something to avoid.")
-        out = inf.recommend(self.destinations, self.query, top_n=5)
-        self.last_results = out
+        # Ask the engine for a few EXTRA picks beyond the 5 we want to show, so
+        # that after we drop any rejected cities we can still backfill up to 5
+        # good options instead of returning a short list.
+        wanted = 5
+        out = inf.recommend(self.destinations, self.query, top_n=wanted + len(self.rejected_cities))
+        # MEMORY filter: remove every city the user has previously rejected this
+        # session, then keep only the first `wanted` survivors.
+        results = [
+            (conf, dest, score)
+            for conf, dest, score in out["results"]
+            if dest["city"] not in self.rejected_cities
+        ][:wanted]
+        # Remember the (filtered) view we actually showed, so 'why' explains
+        # these exact picks and so a follow-up "not <city>" matches the on-screen
+        # list. We copy `out` but swap in the filtered results.
+        self.last_results = dict(out)
+        self.last_results["results"] = results
         lines = []
         # Surface the forward-chaining advisories first, if any fired.
         for msg in out["advisories"]:
             lines.append("Heads up: " + msg)
-        if not out["results"]:
+        if not results:
             lines.append("I couldn't find anything matching all of that. Try relaxing one wish - "
                          "remove a region, widen the budget, or drop the climate. (type 'restart' to redo)")
             return "\n".join(lines)
-        lines.append("Here are my top " + str(len(out["results"])) + " picks (from " + str(out["pool_size"]) + " that fit your region filter):")
+        # Conversational header (RESPONSE TYPE 10), e.g.
+        # "Here are your top picks — chosen from 312 destinations that match your region:"
+        lines.append("Here are your top picks — chosen from " + str(out["pool_size"]) + " destinations that match your region:")
         rank = 1
-        for conf, dest, score in out["results"]:
+        for conf, dest, score in results:
             header = ("#" + str(rank) + " " + dest["city"] + ", " + dest["country"] + " (" + dest["region"] + ", " + str(dest["avg_temp_yearly"]) + "C, " + dest["budget_level"] + ")")
             lines.append(header)
             lines.append("   " + inf.explain(dest, score, self.query))
@@ -299,6 +439,17 @@ class TravelChatbot:
             return self._format_recommendation()
         if intent == "greet":
             return "Hello! " + (self._next_question() or "Tell me your preferences and I'll suggest destinations.")
+        if intent == "reject_city":
+            # Remember the rejected cities for the rest of the session, then
+            # immediately recompute the picks. _format_recommendation() filters
+            # out everything in self.rejected_cities, so the rejected places are
+            # gone and fresh ones take their slots.
+            rejected = self._cities_to_reject(text)
+            for city in rejected:
+                self.rejected_cities.add(city)
+            removed = _join_natural(rejected)
+            return ("Got it, I've removed " + removed + ". Here are updated picks:\n"
+                    + self._format_recommendation())
         # intent == "provide": the user is giving preferences (the common case).
         # 'skip all' -> stop asking the rest and recommend with what we have.
         if self._is_skip_all(text):
