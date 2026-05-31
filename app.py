@@ -13,6 +13,7 @@
 import streamlit as st
 import knowledge_base as kb
 from chatbot import TravelChatbot
+from inference import explain_human
 
 # Basic page setup (title shown in the browser tab + a globe icon).
 st.set_page_config(page_title="Travel Destination Assistant", page_icon="🌍")
@@ -79,9 +80,14 @@ def render_recommendations(payload):
                 # What the city itself is strongest on (lifestyle scores >= 4).
                 if result["strong_on"]:
                     st.markdown("**Strong on:** " + ", ".join(result["strong_on"]))
-                # The certainty-factor breakdown, tucked away to keep cards clean.
+                # Human-readable reasoning (one plain-English bullet per criterion
+                # that actually moved the score), built by inference.explain_human
+                # from the raw dest/score/query carried on the card. No raw
+                # numbers are shown - the technical trace stays in the CLI.
                 with st.expander("Why this pick?"):
-                    st.write(result["explanation"])
+                    for line in explain_human(result["dest"], result["score"],
+                                              payload.get("query", {})):
+                        st.markdown(line)
         # The footer (commands hint) as a quiet caption under the cards.
         st.caption(payload["footer"])
 

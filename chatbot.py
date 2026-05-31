@@ -296,7 +296,13 @@ class TravelChatbot:
                 self.query["budget_exclude"].append(v)
                 changed["budget_exclude"].append(v)
 
-        dur = nlp.extract(text, kb.DURATION_SYNONYMS, allow_spellcheck=self._allow_spellcheck_for("duration"), blocking_vocabulary=self._blocking_vocabulary_for(kb.DURATION_SYNONYMS))
+        # DURATION is the one slot we never fill from a spell-corrected guess.
+        # Duration keywords are short ("day", "week", "long", "short") and prone
+        # to false positives (e.g. "sports" -> "short", "do" -> "day"), and the
+        # bot should ASK about trip length rather than infer it from an unrelated
+        # word. So we force allow_spellcheck=False: duration is only filled when
+        # the user writes an actual duration word, exactly matched.
+        dur = nlp.extract(text, kb.DURATION_SYNONYMS, allow_spellcheck=False, blocking_vocabulary=self._blocking_vocabulary_for(kb.DURATION_SYNONYMS))
         for v in dur["include"]:
             if v not in self.query["duration"]:
                 self.query["duration"].append(v)
@@ -435,9 +441,15 @@ class TravelChatbot:
                 "temp": str(dest["avg_temp_yearly"]) + "C",
                 "budget": dest["budget_level"],
                 "confidence": round(conf, 2),
-                "explanation": explanation,
+                "explanation": explanation,        # technical trace (CLI)
                 "description": dest["short_description"],
                 "strong_on": strong_on,
+                # Raw inputs so the GUI can build a HUMAN explanation on demand
+                # via inference.explain_human(dest, score, query). These are the
+                # same objects already held in self.last_results, so it is just a
+                # reference, not a copy.
+                "dest": dest,
+                "score": score,
             })
             rank += 1
         return {
@@ -446,6 +458,11 @@ class TravelChatbot:
             "header": "Here are your top picks — chosen from " + str(out["pool_size"]) + " destinations that match your region:",
             "results": cards,
             "footer": "Type 'why' for the reasoning, 'restart' to search again, or 'exit' to leave.",
+            # Snapshot of the query so the GUI's human explanation reflects what
+            # the user asked for AT THE TIME of this recommendation, even if they
+            # keep refining preferences afterwards (history stays accurate).
+            "query": {k: (dict(v) if isinstance(v, dict) else list(v))
+                      for k, v in self.query.items()},
         }
     def _explain_last(self):
         # The "why" intent: a deeper reasoning breakdown of the last picks

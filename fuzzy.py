@@ -13,6 +13,16 @@ def _clamp01(x):
     # Keep a number inside the valid membership range [0.0, 1.0].
     return max(0.0, min(1.0, x))
 # ----- CLIMATE: a continuous value (temperature) -> 3 overlapping fuzzy sets --
+# SHAPES (exactly the membership-function shapes taught in "2.2 Fuzzy Logic"):
+#   cold = left-SHOULDER (open trapezoid): 1.0 up to 10C, linear ramp down to 0
+#          at 17C. A shoulder is used because "any temperature this low counts as
+#          fully cold" - there is no upper edge to a cold feeling.
+#   warm = right-SHOULDER (open trapezoid): 0 until 18C, linear ramp up to 1.0 at
+#          25C and flat 1.0 above. Mirror reasoning: hotter only stays "warm".
+#   mild = TRIANGLE peaking at 18C, zero at 12C and 24C. A triangle is used for a
+#          "centred" concept that is most true at one ideal value and fades on
+#          both sides. The three sets OVERLAP, so 21C is partly mild and partly
+#          warm at once - the whole point of fuzzy logic over crisp cutoffs.
 def climate_memberships(temp):
     # "cold": fully 1.0 at/below 10 C, ramps down to 0.0 by 17 C (left shoulder).
     cold = _clamp01((17 - temp) / (17 - 10))
@@ -31,6 +41,11 @@ def climate_membership(temp, term):
     # How much does this temperature belong to ONE climate term ("warm" etc.)?
     return climate_memberships(temp).get(term, 0.0)
 # ----- BUDGET: an ordered category -> graded match ----------------------------
+# SHAPE: a discrete TRIANGULAR membership sampled on the ordinal scale
+# Budget(0) < Mid-range(1) < Luxury(2). The requested level is the triangle's
+# apex (membership 1.0); each step away drops the membership (1.0 -> 0.4 -> 0.0),
+# exactly like a symmetric triangle evaluated at integer offsets. We use a
+# triangle (not a crisp equals) so a neighbouring price band still counts a bit.
 _BUDGET_ORDER = {"Budget": 0, "Mid-range": 1, "Luxury": 2}
 # distance-in-steps -> membership: same level=1.0, one step off=0.4, two off=0.0
 _ORDINAL_MEMBERSHIP = {0: 1.0, 1: 0.4, 2: 0.0}
@@ -44,6 +59,11 @@ def budget_membership(city_level, requested_level):
         return 0.0
     return _ORDINAL_MEMBERSHIP[abs(ci - ri)]
 # ----- DURATION: an ordered category; a city accepts SEVERAL ------------------
+# SHAPE: again a discrete TRIANGULAR membership, on the ordinal duration scale
+# Day trip(0) < Weekend(1) < Short trip(2) < One week(3) < Long trip(4). The
+# requested duration is the apex; membership = max(0, 1 - distance/2), i.e. a
+# triangle with half-width 2 (exact=1.0, one step=0.5, two-or-more=0.0). A city
+# lists several ideal durations, so we take the BEST (fuzzy OR / max) of them.
 _DURATION_ORDER = {"Day trip": 0, "Weekend": 1, "Short trip": 2, "One week": 3, "Long trip": 4}
 def duration_membership(city_durations, requested):
     # Score how close the user's requested duration is to the city's BEST

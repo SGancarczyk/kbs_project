@@ -59,7 +59,9 @@ def cf_combine(cf1, cf2):
     return (cf1 + cf2) / denominator
 def cf_combine_many(cfs):
     # Fold cf_combine across a list of evidence CFs (starting from 0 = "no
-    # opinion"). Order does not matter for the MYCIN formula.
+    # opinion"). Each fold step applies whichever of the THREE MYCIN cases fits
+    # the running pair (both +, both -, or mixed) - see cf_combine above. Order
+    # does not matter for the MYCIN formula, so accumulating left-to-right is safe.
     total = 0.0
     for cf in cfs:
         total = cf_combine(total, cf)
@@ -187,6 +189,8 @@ def forward_chain(initial_facts, advisory_rules):
     # "if" facts are ALL present and whose "then" is new; add that fact. Loop
     # until a pass adds nothing (fixpoint). New facts can satisfy further rules,
     # so rules CHAIN. Higher-priority rules are tried first (conflict resolution).
+    # This matches the course definition exactly: data-driven inference, run to a
+    # fixpoint, with PRIORITY (salience) as the conflict-resolution strategy.
     facts = set(initial_facts)
     fired = []
     messages = []
@@ -258,3 +262,113 @@ def explain(dest, result, query):
             drivers.append(dim)
     driver_text = (" | strong on " + ", ".join(drivers)) if drivers else ""
     return "confidence " + str(round(result["confidence"], 2)) + " | " + components + driver_text
+
+
+# ----------------------------------------------------------------------------
+# HUMAN-FRIENDLY EXPLANATION FACILITY (used by the GUI "Why this pick?" panel).
+# explain() above is the TECHNICAL trace (memberships + signed CFs) kept for the
+# CLI and tests. explain_human() is a SEPARATE, additional function that hides
+# every raw number and turns the reasoning into a few plain-English bullets, so
+# a non-technical user understands *why* a city was suggested.
+# ----------------------------------------------------------------------------
+# Human phrasing for the requested trip length (prose only; the engine itself
+# never needs words). Kept local so inference stays independent of the chatbot.
+_DURATION_HUMAN = {
+    "Day trip": "a day trip",
+    "Weekend": "a weekend",
+    "Short trip": "a short trip",
+    "One week": "a one-week stay",
+    "Long trip": "a long trip",
+}
+
+
+def _quality_word(membership):
+    # Translate a fuzzy membership (0..1) into a linguistic term. This is the
+    # inverse of fuzzification taught in class - a small "defuzzification into
+    # words" - so the user reads "great match" instead of a number like 0.93.
+    if membership >= 0.9:
+        return "great match"
+    if membership >= 0.7:
+        return "good match"
+    if membership >= 0.5:
+        return "partial match"
+    return "weak match"
+
+
+def explain_human(dest, score, query):
+    # Return a list of short, plain-English bullet points (no raw numbers) that
+    # justify this pick. Rules:
+    #   - skip any criterion whose |CF| < 0.05 (negligible evidence)
+    #   - skip "_exclude" entries whose membership ~ 0 (the exclusion had no
+    #     effect, so it is not worth mentioning)
+    #   - any criterion with CF <= -0.1 is flagged as "not an ideal fit"
+    #   - keep at most the 4 most influential bullets, ranked by |CF|
+    details = score.get("details", {})
+    bullets = []  # list of (abs_cf, text); we sort by abs_cf and keep the top 4
+
+    # --- CLIMATE (fuzzy temperature match) ---
+    if "climate" in details:
+        m, cf = details["climate"]
+        if cf <= -0.1:
+            bullets.append((abs(cf), "⚠️ Climate — not an ideal fit"))
+        elif abs(cf) >= 0.05:
+            label = dest.get("climate", "")
+            temp = dest.get("avg_temp_yearly")
+            # The temperature is a factual attribute (not a membership/CF), so it
+            # is fine to show; the membership itself stays hidden behind words.
+            bullets.append((abs(cf), "🌡 Climate — " + _quality_word(m)
+                            + " (" + label + ", " + str(temp) + "°C yearly average)"))
+
+    # --- BUDGET (ordinal fuzzy match) ---
+    if "budget" in details:
+        m, cf = details["budget"]
+        level = dest.get("budget_level", "")
+        if cf <= -0.1:
+            bullets.append((abs(cf), "⚠️ Budget — not an ideal fit (" + level + ")"))
+        elif abs(cf) >= 0.05:
+            phrase = "perfect fit" if m >= 0.9 else _quality_word(m)
+            bullets.append((abs(cf), "💰 Budget — " + phrase + " (" + level + " as requested)"))
+
+    # --- DURATION (ordinal fuzzy match) ---
+    if "duration" in details:
+        m, cf = details["duration"]
+        wanted = query.get("duration") or []
+        human = _DURATION_HUMAN.get(wanted[0], "your trip length") if wanted else "your trip length"
+        if cf <= -0.1:
+            bullets.append((abs(cf), "⚠️ Duration — not an ideal fit"))
+        elif abs(cf) >= 0.05:
+            bullets.append((abs(cf), "🗓 Duration — " + _quality_word(m)
+                            + " (suits " + human + ")"))
+
+    # --- LIFESTYLE / interests (cosine taste match) ---
+    if "lifestyle" in details:
+        m, cf = details["lifestyle"]
+        if cf <= -0.1:
+            bullets.append((abs(cf), "⚠️ Interests — not an ideal fit"))
+        elif abs(cf) >= 0.05:
+            wanted = query.get("lifestyle") or {}
+            # Name the specific dimensions that are BOTH wanted (>=4) and strong
+            # in the city (>=4), which is the most concrete thing to tell a user.
+            strong = [d for d, w in wanted.items() if w >= 4 and dest.get(d, 0) >= 4]
+            if strong:
+                bullets.append((abs(cf), "🎯 Interests — strong overlap on " + ", ".join(strong)))
+            else:
+                bullets.append((abs(cf), "🎯 Interests — " + _quality_word(m) + " on what you enjoy"))
+
+    # --- EXCLUSIONS: only mention when they actually bit (membership not ~0) ---
+    exclude_labels = {
+        "climate_exclude": "Climate",
+        "budget_exclude": "Budget",
+        "duration_exclude": "Duration",
+        "lifestyle_exclude": "Interests",
+    }
+    for key, label in exclude_labels.items():
+        if key in details:
+            m, cf = details[key]
+            if m >= 0.05 and cf <= -0.1:
+                bullets.append((abs(cf), "⚠️ " + label + " — has some of what you wanted to avoid"))
+
+    if not bullets:
+        return ["A broad, balanced pick — no single criterion stood out."]
+    bullets.sort(key=lambda b: b[0], reverse=True)
+    return [text for _, text in bullets[:4]]

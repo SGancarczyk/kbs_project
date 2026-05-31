@@ -3,14 +3,37 @@
 # THE NATURAL-LANGUAGE LAYER of the chatbot interface.
 # It turns a messy user sentence into clean facts for the rest of the KBS:
 # normalize, tokenize, lemmatize, match domain vocabulary, correct small typos,
-# and handle negation such as "not asia" or "avoid nightlife". The whole module
-# uses only Python's standard library, so the language understanding logic stays
-# transparent and course compliant.
+# and handle negation such as "not asia" or "avoid nightlife".
+#
+# COURSE-COMPLIANCE NOTE: this whole module uses ONLY Python's standard library
+# (just `re`). There is NO NLTK, no spaCy, no transformers, no external NLP API
+# of any kind - every step of the NLP pipeline taught in class (normalization,
+# tokenization, lemmatization, edit-distance spell correction, negation
+# handling) is implemented by hand here so the language understanding stays
+# transparent and the chatbot is "100% implemented by us" as the brief requires.
 # ----------------------------------------------------------------------------
 import re
 
 NEGATION_WORDS = {"not", "no", "dont", "don't", "avoid", "without", "except", "never", "exclude", "hate", "skip"}
 NEGATION_CONNECTORS = {"or", "and", "nor"}
+
+# ----------------------------------------------------------------------------
+# SPELL-CORRECTION BLOCKLIST.
+# The spell corrector fixes genuine typos (e.g. "chaep" -> "cheap"), but some
+# perfectly ordinary English words sit one or two edits away from a short
+# vocabulary keyword and would be silently "corrected" into the wrong slot.
+# The classic offender is "sports" -> "short" -> DURATION "Short trip" (same
+# first/last letter, edit distance 2). These are real words in their own right,
+# so they must NEVER be rewritten into a keyword. Keeping them here, separate
+# from the corrector, makes the guard explicit and easy to extend.
+# ----------------------------------------------------------------------------
+SPELLCHECK_BLOCKLIST = {
+    "sports", "sport", "place", "places", "space", "spare",
+    "short", "shore", "store", "score", "story", "storm",
+    "start", "smart", "class", "glass", "grass", "brass",
+    "cheap", "clean", "clear", "cream", "great", "treat",
+    "sleep", "steep", "speed", "spend", "sweet", "sweep",
+}
 
 # ----------------------------------------------------------------------------
 # INFORMAL-PHRASE NORMALIZATION (runs BEFORE tokenization).
@@ -114,6 +137,11 @@ def _spell_correct(token, vocabulary, max_ratio=0.26):
     # unrelated words across categories, for example cheap -> heat, mild -> mid,
     # south -> short, or range -> france.
     if token in vocabulary:
+        return token
+    # GUARD: never auto-correct a known common English word into a lookalike
+    # keyword (e.g. "sports" -> "short"). Such words stay exactly as the user
+    # typed them, so they cannot leak into the wrong slot.
+    if token in SPELLCHECK_BLOCKLIST:
         return token
     if len(token) <= 3:
         return token
