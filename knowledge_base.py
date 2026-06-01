@@ -2,12 +2,18 @@
 # ----------------------------------------------------------------------------
 # THE KNOWLEDGE BASE of our Knowledge-Based System (KBS).
 # Stores: (1) the travel city table loaded from CSV, (2) domain vocabulary
-# dictionaries mapping human words to dataset values, (3) a new SEASON/MONTH
-# vocabulary so the bot can match monthly temperature instead of yearly average.
+# dictionaries mapping human words to dataset values, (3) a SEASON/MONTH
+# vocabulary so the bot can match monthly temperature instead of yearly average,
+# (4) NEW: a COUNTRY_SYNONYMS vocabulary so the user can name a specific country
+#     ("I want to go to Japan") and the bot pins results to that country exactly,
+#     mirroring the season/month pattern: keyword -> canonical country name,
+#     with a country_to_region() helper so inference can still do the region
+#     filter it already knows how to do.
 # ----------------------------------------------------------------------------
 import csv
 import json
 import os
+import pandas as pd    # replaces the built-in csv module for data loading
 
 LIFESTYLE_DIMENSIONS = ["culture", "adventure", "nature", "beaches", "nightlife", "cuisine", "wellness", "urban", "seclusion"]
 REGIONS = ["europe", "asia", "africa", "north_america", "south_america", "oceania", "middle_east"]
@@ -32,6 +38,282 @@ MONTH_NUMBER = {
     "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 }
 
+# NEW: which region each dataset country belongs to.
+# Used by country_to_region() so the inference engine can apply its existing
+# region filter whenever the user names a specific country.
+COUNTRY_REGION = {
+    # Europe
+    "Albania": "europe", "Austria": "europe", "Belarus": "europe",
+    "Belgium": "europe", "Bosnia and Herzegovina": "europe", "Bulgaria": "europe",
+    "Croatia": "europe", "Cyprus": "europe", "Czech Republic": "europe",
+    "Denmark": "europe", "Estonia": "europe", "Finland": "europe",
+    "France": "europe", "Germany": "europe", "Greece": "europe",
+    "Greenland": "europe", "Hungary": "europe", "Iceland": "europe",
+    "Ireland": "europe", "Italy": "europe", "Kosovo": "europe",
+    "Latvia": "europe", "Lithuania": "europe", "Luxembourg": "europe",
+    "Malta": "europe", "Moldova": "europe", "Monaco": "europe",
+    "Montenegro": "europe", "Netherlands": "europe", "North Macedonia": "europe",
+    "Norway": "europe", "Poland": "europe", "Portugal": "europe",
+    "Romania": "europe", "Russia": "europe", "San Marino": "europe",
+    "Serbia": "europe", "Slovakia": "europe", "Slovenia": "europe",
+    "Spain": "europe", "Sweden": "europe", "Switzerland": "europe",
+    "Ukraine": "europe", "United Kingdom": "europe",
+    # Asia
+    "Azerbaijan": "asia", "Bangladesh": "asia", "Bhutan": "asia",
+    "Cambodia": "asia", "China": "asia", "Hong Kong": "asia",
+    "India": "asia", "Indonesia": "asia", "Japan": "asia",
+    "Kazakhstan": "asia", "Kyrgyzstan": "asia", "Laos": "asia",
+    "Malaysia": "asia", "Maldives": "asia", "Mongolia": "asia",
+    "Myanmar": "asia", "Nepal": "asia", "Pakistan": "asia",
+    "Palau": "asia", "Philippines": "asia", "Singapore": "asia",
+    "South Korea": "asia", "Sri Lanka": "asia", "Taiwan": "asia",
+    "Tajikistan": "asia", "Thailand": "asia", "Turkmenistan": "asia",
+    "Uzbekistan": "asia", "Vietnam": "asia",
+    # Africa
+    "Angola": "africa", "Benin": "africa", "Botswana": "africa",
+    "Burundi": "africa", "Cameroon": "africa", "Cape Verde": "africa",
+    "Comoros": "africa", "Egypt": "africa", "Equatorial Guinea": "africa",
+    "Eswatini": "africa", "Ethiopia": "africa", "Gabon": "africa",
+    "Gambia": "africa", "Ghana": "africa", "Ivory Coast": "africa",
+    "Kenya": "africa", "Lesotho": "africa", "Madagascar": "africa",
+    "Malawi": "africa", "Mauritius": "africa", "Morocco": "africa",
+    "Mozambique": "africa", "Namibia": "africa", "Rwanda": "africa",
+    "Réunion": "africa", "São Tomé and Príncipe": "africa",
+    "Senegal": "africa", "Seychelles": "africa", "Sierra Leone": "africa",
+    "South Africa": "africa", "Tanzania": "africa", "Togo": "africa",
+    "Tunisia": "africa", "Uganda": "africa", "Zambia": "africa",
+    "Zimbabwe": "africa", "Republic of the Congo": "africa",
+    # North America
+    "Barbados": "north_america", "Belize": "north_america",
+    "Bermuda": "north_america", "Canada": "north_america",
+    "Cook Islands": "north_america", "Costa Rica": "north_america",
+    "Cuba": "north_america", "Dominica": "north_america",
+    "Dominican Republic": "north_america", "El Salvador": "north_america",
+    "Grenada": "north_america", "Guatemala": "north_america",
+    "Jamaica": "north_america", "Mexico": "north_america",
+    "Nicaragua": "north_america", "Panama": "north_america",
+    "Puerto Rico": "north_america", "Quebec": "north_america",
+    "Saint Kitts and Nevis": "north_america", "Saint Lucia": "north_america",
+    "Trinidad and Tobago": "north_america", "Turks and Caicos": "north_america",
+    "U.S. Virgin Islands": "north_america", "United States": "north_america",
+    # South America
+    "Argentina": "south_america", "Bolivia": "south_america",
+    "Brazil": "south_america", "Chile": "south_america",
+    "Colombia": "south_america", "Ecuador": "south_america",
+    "French Guiana": "south_america", "Guyana": "south_america",
+    "Paraguay": "south_america", "Peru": "south_america",
+    "Suriname": "south_america", "Uruguay": "south_america",
+    "Venezuela": "south_america",
+    # Oceania
+    "American Samoa": "oceania", "Australia": "oceania",
+    "Fiji": "oceania", "New Caledonia": "oceania",
+    "New Zealand": "oceania", "Papua New Guinea": "oceania",
+    "Samoa": "oceania", "Solomon Islands": "oceania",
+    "Tonga": "oceania", "Tuvalu": "oceania", "Vanuatu": "oceania",
+    "French Polynesia": "oceania",
+    # Middle East
+    "Bahrain": "middle_east", "Georgia": "middle_east",
+    "Iran": "middle_east", "Iraq": "middle_east",
+    "Israel": "middle_east", "Jordan": "middle_east",
+    "Kuwait": "middle_east", "Lebanon": "middle_east",
+    "Oman": "middle_east", "Qatar": "middle_east",
+    "Saudi Arabia": "middle_east", "Turkey": "middle_east",
+    "United Arab Emirates": "middle_east",
+}
+
+# NEW: COUNTRY_SYNONYMS maps user keywords -> canonical country name (as it
+# appears in the dataset's "country" column). Pattern mirrors SEASON_SYNONYMS:
+# keyword -> canonical value. country_to_region() then resolves to region.
+# No spellcheck on country names (same reason as season: short exact words
+# are safer). Adjectives, demonyms, capitals, and common abbreviations are
+# included so "japanese", "tokyo", "jp" all resolve to "Japan".
+COUNTRY_SYNONYMS = {
+    # Europe
+    "albania": "Albania", "albanian": "Albania",
+    "austria": "Austria", "austrian": "Austria", "vienna": "Austria",
+    "belarus": "Belarus", "belarusian": "Belarus", "minsk": "Belarus",
+    "belgium": "Belgium", "belgian": "Belgium", "brussels": "Belgium", "bruges": "Belgium",
+    "bosnia": "Bosnia and Herzegovina", "bosnian": "Bosnia and Herzegovina", "sarajevo": "Bosnia and Herzegovina",
+    "bulgaria": "Bulgaria", "bulgarian": "Bulgaria", "sofia": "Bulgaria",
+    "croatia": "Croatia", "croatian": "Croatia", "zagreb": "Croatia", "dubrovnik": "Croatia", "split": "Croatia",
+    "cyprus": "Cyprus", "cypriot": "Cyprus", "nicosia": "Cyprus",
+    "czech republic": "Czech Republic", "czech": "Czech Republic", "czechia": "Czech Republic", "prague": "Czech Republic",
+    "denmark": "Denmark", "danish": "Denmark", "copenhagen": "Denmark",
+    "estonia": "Estonia", "estonian": "Estonia", "tallinn": "Estonia",
+    "finland": "Finland", "finnish": "Finland", "helsinki": "Finland",
+    "france": "France", "french": "France", "paris": "France", "lyon": "France", "nice, france": "France",
+    "germany": "Germany", "german": "Germany", "berlin": "Germany", "munich": "Germany", "hamburg": "Germany",
+    "greece": "Greece", "greek": "Greece", "athens": "Greece", "thessaloniki": "Greece",
+    "greenland": "Greenland", "greenlandic": "Greenland", "nuuk": "Greenland",
+    "hungary": "Hungary", "hungarian": "Hungary", "budapest": "Hungary",
+    "iceland": "Iceland", "icelandic": "Iceland", "reykjavik": "Iceland",
+    "ireland": "Ireland", "irish": "Ireland", "dublin": "Ireland",
+    "italy": "Italy", "italian": "Italy", "rome": "Italy", "milan": "Italy", "venice": "Italy", "florence": "Italy", "naples": "Italy",
+    "kosovo": "Kosovo", "pristina": "Kosovo",
+    "latvia": "Latvia", "latvian": "Latvia", "riga": "Latvia",
+    "lithuania": "Lithuania", "lithuanian": "Lithuania", "vilnius": "Lithuania",
+    "luxembourg": "Luxembourg",
+    "malta": "Malta", "maltese": "Malta", "valletta": "Malta",
+    "moldova": "Moldova", "moldovan": "Moldova", "chisinau": "Moldova",
+    "monaco": "Monaco", "monegasque": "Monaco",
+    "montenegro": "Montenegro", "podgorica": "Montenegro",
+    "netherlands": "Netherlands", "dutch": "Netherlands", "amsterdam": "Netherlands",
+    "north macedonia": "North Macedonia", "macedonian": "North Macedonia", "skopje": "North Macedonia",
+    "norway": "Norway", "norwegian": "Norway", "oslo": "Norway", "bergen": "Norway",
+    "poland": "Poland", "polish": "Poland", "warsaw": "Poland", "krakow": "Poland",
+    "portugal": "Portugal", "portuguese": "Portugal", "lisbon": "Portugal", "porto": "Portugal",
+    "romania": "Romania", "romanian": "Romania", "bucharest": "Romania",
+    "russia": "Russia", "russian": "Russia", "moscow": "Russia", "st petersburg": "Russia",
+    "san marino": "San Marino",
+    "serbia": "Serbia", "serbian": "Serbia", "belgrade": "Serbia",
+    "slovakia": "Slovakia", "slovak": "Slovakia", "bratislava": "Slovakia",
+    "slovenia": "Slovenia", "slovenian": "Slovenia", "ljubljana": "Slovenia",
+    "spain": "Spain", "spanish": "Spain", "madrid": "Spain", "barcelona": "Spain", "seville": "Spain",
+    "sweden": "Sweden", "swedish": "Sweden", "stockholm": "Sweden", "gothenburg": "Sweden",
+    "switzerland": "Switzerland", "swiss": "Switzerland", "zurich": "Switzerland", "geneva": "Switzerland",
+    "ukraine": "Ukraine", "ukrainian": "Ukraine", "kyiv": "Ukraine",
+    "united kingdom": "United Kingdom", "british": "United Kingdom",
+    "england": "United Kingdom", "london": "United Kingdom", "scotland": "United Kingdom",
+    "edinburgh": "United Kingdom", "wales": "United Kingdom",
+    # Asia
+    "azerbaijan": "Azerbaijan", "azerbaijani": "Azerbaijan", "baku": "Azerbaijan",
+    "bangladesh": "Bangladesh", "bangladeshi": "Bangladesh", "dhaka": "Bangladesh",
+    "bhutan": "Bhutan", "bhutanese": "Bhutan", "thimphu": "Bhutan",
+    "cambodia": "Cambodia", "cambodian": "Cambodia", "phnom penh": "Cambodia", "siem reap": "Cambodia",
+    "china": "China", "chinese": "China", "beijing": "China", "shanghai": "China", "chengdu": "China",
+    "hong kong": "Hong Kong",
+    "india": "India", "indian": "India", "delhi": "India", "mumbai": "India", "goa": "India", "jaipur": "India",
+    "indonesia": "Indonesia", "indonesian": "Indonesia", "bali": "Indonesia", "jakarta": "Indonesia",
+    "japan": "Japan", "japanese": "Japan", "tokyo": "Japan", "kyoto": "Japan", "osaka": "Japan",
+    "kazakhstan": "Kazakhstan", "kazakh": "Kazakhstan", "almaty": "Kazakhstan",
+    "kyrgyzstan": "Kyrgyzstan", "kyrgyz": "Kyrgyzstan", "bishkek": "Kyrgyzstan",
+    "laos": "Laos", "lao": "Laos", "vientiane": "Laos",
+    "malaysia": "Malaysia", "malaysian": "Malaysia", "kuala lumpur": "Malaysia", "penang": "Malaysia",
+    "maldives": "Maldives", "maldivian": "Maldives",
+    "mongolia": "Mongolia", "mongolian": "Mongolia", "ulaanbaatar": "Mongolia",
+    "myanmar": "Myanmar", "burmese": "Myanmar", "yangon": "Myanmar", "burma": "Myanmar",
+    "nepal": "Nepal", "nepali": "Nepal", "kathmandu": "Nepal",
+    "pakistan": "Pakistan", "pakistani": "Pakistan", "karachi": "Pakistan", "lahore": "Pakistan",
+    "palau": "Palau",
+    "philippines": "Philippines", "filipino": "Philippines", "manila": "Philippines", "cebu": "Philippines",
+    "singapore": "Singapore", "singaporean": "Singapore",
+    "south korea": "South Korea", "korean": "South Korea", "seoul": "South Korea", "busan": "South Korea",
+    "sri lanka": "Sri Lanka", "sri lankan": "Sri Lanka", "colombo": "Sri Lanka",
+    "taiwan": "Taiwan", "taiwanese": "Taiwan", "taipei": "Taiwan",
+    "tajikistan": "Tajikistan", "tajik": "Tajikistan", "dushanbe": "Tajikistan",
+    "thailand": "Thailand", "thai": "Thailand", "bangkok": "Thailand", "phuket": "Thailand", "chiang mai": "Thailand",
+    "turkmenistan": "Turkmenistan", "ashgabat": "Turkmenistan",
+    "uzbekistan": "Uzbekistan", "uzbek": "Uzbekistan", "tashkent": "Uzbekistan", "samarkand": "Uzbekistan",
+    "vietnam": "Vietnam", "vietnamese": "Vietnam", "hanoi": "Vietnam", "ho chi minh": "Vietnam", "hoi an": "Vietnam",
+    # Africa
+    "angola": "Angola", "angolan": "Angola", "luanda": "Angola",
+    "benin": "Benin", "beninese": "Benin", "cotonou": "Benin",
+    "botswana": "Botswana", "gaborone": "Botswana",
+    "burundi": "Burundi", "bujumbura": "Burundi",
+    "cameroon": "Cameroon", "cameroonian": "Cameroon", "yaounde": "Cameroon",
+    "cape verde": "Cape Verde", "cabo verde": "Cape Verde",
+    "comoros": "Comoros",
+    "egypt": "Egypt", "egyptian": "Egypt", "cairo": "Egypt",
+    "equatorial guinea": "Equatorial Guinea",
+    "eswatini": "Eswatini", "swaziland": "Eswatini",
+    "ethiopia": "Ethiopia", "ethiopian": "Ethiopia", "addis ababa": "Ethiopia",
+    "gabon": "Gabon", "libreville": "Gabon",
+    "gambia": "Gambia", "banjul": "Gambia",
+    "ghana": "Ghana", "ghanaian": "Ghana", "accra": "Ghana",
+    "ivory coast": "Ivory Coast", "cote d'ivoire": "Ivory Coast", "abidjan": "Ivory Coast",
+    "kenya": "Kenya", "kenyan": "Kenya", "nairobi": "Kenya",
+    "lesotho": "Lesotho", "maseru": "Lesotho",
+    "madagascar": "Madagascar", "malagasy": "Madagascar", "antananarivo": "Madagascar",
+    "malawi": "Malawi", "lilongwe": "Malawi",
+    "mauritius": "Mauritius",
+    "morocco": "Morocco", "moroccan": "Morocco", "marrakech": "Morocco", "casablanca": "Morocco", "fez": "Morocco",
+    "mozambique": "Mozambique", "maputo": "Mozambique",
+    "namibia": "Namibia", "windhoek": "Namibia",
+    "rwanda": "Rwanda", "kigali": "Rwanda",
+    "reunion": "Réunion",
+    "sao tome": "São Tomé and Príncipe",
+    "senegal": "Senegal", "senegalese": "Senegal", "dakar": "Senegal",
+    "seychelles": "Seychelles",
+    "sierra leone": "Sierra Leone", "freetown": "Sierra Leone",
+    "south africa": "South Africa", "cape town": "South Africa", "johannesburg": "South Africa",
+    "tanzania": "Tanzania", "tanzanian": "Tanzania", "dar es salaam": "Tanzania", "zanzibar": "Tanzania",
+    "togo": "Togo", "lome": "Togo",
+    "tunisia": "Tunisia", "tunisian": "Tunisia", "tunis": "Tunisia",
+    "uganda": "Uganda", "kampala": "Uganda",
+    "zambia": "Zambia", "lusaka": "Zambia",
+    "zimbabwe": "Zimbabwe", "harare": "Zimbabwe",
+    "republic of the congo": "Republic of the Congo", "brazzaville": "Republic of the Congo",
+    # North America
+    "barbados": "Barbados", "bridgetown": "Barbados",
+    "belize": "Belize", "belmopan": "Belize",
+    "bermuda": "Bermuda",
+    "canada": "Canada", "canadian": "Canada", "toronto": "Canada", "vancouver": "Canada", "montreal": "Canada",
+    "costa rica": "Costa Rica", "san jose": "Costa Rica",
+    "cuba": "Cuba", "cuban": "Cuba", "havana": "Cuba",
+    "dominica": "Dominica", "roseau": "Dominica",
+    "dominican republic": "Dominican Republic", "santo domingo": "Dominican Republic",
+    "el salvador": "El Salvador", "san salvador": "El Salvador",
+    "grenada": "Grenada",
+    "guatemala": "Guatemala", "guatemalan": "Guatemala", "guatemala city": "Guatemala",
+    "jamaica": "Jamaica", "jamaican": "Jamaica", "kingston": "Jamaica",
+    "mexico": "Mexico", "mexican": "Mexico", "mexico city": "Mexico", "cancun": "Mexico",
+    "nicaragua": "Nicaragua", "managua": "Nicaragua",
+    "panama": "Panama", "panamanian": "Panama", "panama city": "Panama",
+    "puerto rico": "Puerto Rico", "san juan": "Puerto Rico",
+    "quebec": "Quebec",
+    "saint kitts": "Saint Kitts and Nevis", "st kitts": "Saint Kitts and Nevis",
+    "saint lucia": "Saint Lucia", "st lucia": "Saint Lucia",
+    "trinidad": "Trinidad and Tobago", "tobago": "Trinidad and Tobago", "port of spain": "Trinidad and Tobago",
+    "turks and caicos": "Turks and Caicos",
+    "us virgin islands": "U.S. Virgin Islands",
+    "united states": "United States", "usa": "United States",
+    "new york": "United States", "nyc": "United States", "los angeles": "United States",
+    "chicago": "United States", "miami": "United States", "las vegas": "United States",
+    # South America
+    "argentina": "Argentina", "argentine": "Argentina", "buenos aires": "Argentina",
+    "bolivia": "Bolivia", "la paz": "Bolivia",
+    "brazil": "Brazil", "brazilian": "Brazil", "rio": "Brazil", "sao paulo": "Brazil",
+    "chile": "Chile", "chilean": "Chile", "santiago": "Chile",
+    "colombia": "Colombia", "colombian": "Colombia", "bogota": "Colombia", "medellin": "Colombia",
+    "ecuador": "Ecuador", "quito": "Ecuador",
+    "french guiana": "French Guiana",
+    "guyana": "Guyana", "georgetown": "Guyana",
+    "paraguay": "Paraguay", "asuncion": "Paraguay",
+    "peru": "Peru", "peruvian": "Peru", "lima": "Peru", "cusco": "Peru",
+    "suriname": "Suriname", "paramaribo": "Suriname",
+    "uruguay": "Uruguay", "montevideo": "Uruguay",
+    "venezuela": "Venezuela", "venezuelan": "Venezuela", "caracas": "Venezuela",
+    # Oceania
+    "american samoa": "American Samoa",
+    "australia": "Australia", "australian": "Australia", "sydney": "Australia", "melbourne": "Australia",
+    "fiji": "Fiji", "fijian": "Fiji", "suva": "Fiji",
+    "new caledonia": "New Caledonia", "noumea": "New Caledonia",
+    "new zealand": "New Zealand", "kiwi": "New Zealand", "auckland": "New Zealand", "wellington": "New Zealand",
+    "papua new guinea": "Papua New Guinea", "port moresby": "Papua New Guinea",
+    "samoa": "Samoa", "apia": "Samoa",
+    "solomon islands": "Solomon Islands", "honiara": "Solomon Islands",
+    "tonga": "Tonga", "nukualofa": "Tonga",
+    "tuvalu": "Tuvalu", "funafuti": "Tuvalu",
+    "vanuatu": "Vanuatu", "port vila": "Vanuatu",
+    "french polynesia": "French Polynesia", "tahiti": "French Polynesia", "bora bora": "French Polynesia",
+    # Middle East
+    "bahrain": "Bahrain", "manama": "Bahrain",
+    "georgia": "Georgia", "tbilisi": "Georgia",
+    "iran": "Iran", "iranian": "Iran", "tehran": "Iran",
+    "iraq": "Iraq", "iraqi": "Iraq", "baghdad": "Iraq",
+    "israel": "Israel", "israeli": "Israel", "tel aviv": "Israel", "jerusalem": "Israel",
+    "jordan": "Jordan", "jordanian": "Jordan", "amman": "Jordan", "petra": "Jordan",
+    "kuwait": "Kuwait", "kuwait city": "Kuwait",
+    "lebanon": "Lebanon", "lebanese": "Lebanon", "beirut": "Lebanon",
+    "oman": "Oman", "omani": "Oman", "muscat": "Oman",
+    "qatar": "Qatar", "qatari": "Qatar", "doha": "Qatar",
+    "saudi arabia": "Saudi Arabia", "saudi": "Saudi Arabia", "riyadh": "Saudi Arabia",
+    "turkey": "Turkey", "turkish": "Turkey", "istanbul": "Turkey", "ankara": "Turkey",
+    "united arab emirates": "United Arab Emirates", "uae": "United Arab Emirates",
+    "dubai": "United Arab Emirates", "abu dhabi": "United Arab Emirates",
+}
+
+
 def yearly_avg_temp(avg_temp_monthly):
     monthly_avgs = [month["avg"] for month in avg_temp_monthly.values()]
     return sum(monthly_avgs) / len(monthly_avgs)
@@ -55,184 +337,116 @@ def seasonal_avg_temp(avg_temp_monthly, months):
     return sum(avgs) / len(avgs)
 
 def load_destinations(csv_path=None):
+    # REWRITE: use pandas.read_csv() instead of csv.DictReader + for-loop.
     if csv_path is None:
         here = os.path.dirname(os.path.abspath(__file__))
         csv_path = os.path.join(here, "Worldwide Travel Cities Dataset (Ratings and Climate).csv")
-    destinations = []
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            row["avg_temp_monthly"] = json.loads(row["avg_temp_monthly"])
-            row["ideal_durations"] = json.loads(row["ideal_durations"])
-            for dim in LIFESTYLE_DIMENSIONS:
-                row[dim] = int(row[dim])
-            yearly = yearly_avg_temp(row["avg_temp_monthly"])
-            row["avg_temp_yearly"] = round(yearly, 1)
-            row["climate"] = climate_label(yearly)
-            destinations.append(row)
-    return destinations
+    df = pd.read_csv(csv_path)
+    df["avg_temp_monthly"] = df["avg_temp_monthly"].apply(json.loads)
+    df["ideal_durations"]  = df["ideal_durations"].apply(json.loads)
+    for dim in LIFESTYLE_DIMENSIONS:
+        df[dim] = df[dim].astype(int)
+    df["avg_temp_yearly"] = df["avg_temp_monthly"].apply(lambda m: round(yearly_avg_temp(m), 1))
+    df["climate"]         = df["avg_temp_yearly"].apply(climate_label)
+    return df.to_dict(orient="records")
+
+def country_to_region(country_name):
+    """Return the region for a canonical country name, or None if unknown."""
+    return COUNTRY_REGION.get(country_name)
+
+def season_to_months(season_key):
+    """Convert a season/month key to a list of month numbers."""
+    if season_key in SEASON_MONTHS:
+        return SEASON_MONTHS[season_key]
+    if season_key in MONTH_NUMBER:
+        return [MONTH_NUMBER[season_key]]
+    return []
 
 # ----------------------------------------------------------------------------
 # DOMAIN VOCABULARY
 # ----------------------------------------------------------------------------
 
 CONTINENT_SYNONYMS = {
-    # Core continents / regions
-    "europe": "europe", "european": "europe",
-    # Western Europe
-    "spain": "europe", "spanish": "europe", "madrid": "europe", "barcelona": "europe",
-    "france": "europe", "french": "europe", "paris": "europe",
-    "italy": "europe", "italian": "europe", "rome": "europe", "milan": "europe", "venice": "europe", "florence": "europe",
-    "greece": "europe", "greek": "europe", "athens": "europe",
-    "portugal": "europe", "portuguese": "europe", "lisbon": "europe",
-    "germany": "europe", "german": "europe", "berlin": "europe", "munich": "europe",
-    "netherlands": "europe", "dutch": "europe", "amsterdam": "europe",
-    "switzerland": "europe", "swiss": "europe", "zurich": "europe",
-    "austria": "europe", "vienna": "europe",
-    "belgium": "europe", "belgian": "europe", "brussels": "europe",
-    "ireland": "europe", "irish": "europe", "dublin": "europe",
-    "scotland": "europe", "scottish": "europe", "edinburgh": "europe",
-    "england": "europe", "english": "europe", "london": "europe",
-    "britain": "europe", "british": "europe", "uk": "europe",
-    "wales": "europe", "welsh": "europe",
-    # Northern Europe
-    "sweden": "europe", "swedish": "europe", "stockholm": "europe",
-    "norway": "europe", "norwegian": "europe", "oslo": "europe",
-    "denmark": "europe", "danish": "europe", "copenhagen": "europe",
-    "finland": "europe", "finnish": "europe", "helsinki": "europe",
-    "scandinavia": "europe", "scandinavian": "europe",
-    "nordic": "europe", "iceland": "europe", "icelandic": "europe", "reykjavik": "europe",
-    # Eastern / Central Europe
-    "poland": "europe", "polish": "europe", "warsaw": "europe", "krakow": "europe",
-    "czech": "europe", "prague": "europe",
-    "hungary": "europe", "budapest": "europe",
-    "romania": "europe", "bucharest": "europe",
-    "bulgaria": "europe", "sofia": "europe",
-    "ukraine": "europe", "kyiv": "europe",
-    "balkans": "europe", "balkan": "europe",
-    "serbia": "europe", "belgrade": "europe",
-    "croatia": "europe", "zagreb": "europe", "dubrovnik": "europe", "split": "europe",
-    "slovenia": "europe", "ljubljana": "europe",
-    "slovakia": "europe", "bratislava": "europe",
-    "albania": "europe",
-    "montenegro": "europe",
-    "bosnia": "europe",
+    # Pure region/continent keywords only.
+    # Country names, city names, and demonyms have been moved to COUNTRY_SYNONYMS
+    # so that a token like 'japan' only ever matches one vocabulary.
+    # Europe
+    "balkan": "europe",
+    "balkans": "europe",
+    "britain": "europe",
+    "english": "europe",
+    "europe": "europe",
+    "european": "europe",
     "macedonia": "europe",
-    "moldova": "europe",
-    "latvia": "europe", "riga": "europe",
-    "lithuania": "europe", "vilnius": "europe",
-    "estonia": "europe", "tallinn": "europe",
-    "malta": "europe", "valletta": "europe",
-    "luxembourg": "europe",
-    "monaco": "europe",
+    "nordic": "europe",
+    "scandinavia": "europe",
+    "scandinavian": "europe",
+    "scottish": "europe",
+    "uk": "europe",
+    "welsh": "europe",
     # Asia
-    "asia": "asia", "asian": "asia",
-    "japan": "asia", "japanese": "asia", "tokyo": "asia", "kyoto": "asia", "osaka": "asia",
-    "china": "asia", "chinese": "asia", "beijing": "asia", "shanghai": "asia",
-    "thailand": "asia", "thai": "asia", "bangkok": "asia", "phuket": "asia", "chiangmai": "asia",
-    "india": "asia", "indian": "asia", "delhi": "asia", "mumbai": "asia", "goa": "asia", "jaipur": "asia",
-    "vietnam": "asia", "vietnamese": "asia", "hanoi": "asia", "hochiminh": "asia", "hoi an": "asia",
-    "indonesia": "asia", "indonesian": "asia", "bali": "asia", "jakarta": "asia", "lombok": "asia",
-    "korea": "asia", "korean": "asia", "seoul": "asia", "busan": "asia",
-    "malaysia": "asia", "kuala lumpur": "asia", "penang": "asia",
-    "singapore": "asia",
-    "philippines": "asia", "philippine": "asia", "manila": "asia", "cebu": "asia", "palawan": "asia",
-    "cambodia": "asia", "cambodian": "asia", "phnom penh": "asia", "siem reap": "asia",
-    "nepal": "asia", "nepali": "asia", "kathmandu": "asia",
-    "taiwan": "asia", "taipei": "asia",
-    "myanmar": "asia", "burma": "asia", "burmese": "asia", "yangon": "asia",
-    "laos": "asia", "lao": "asia", "vientiane": "asia",
-    "sri lanka": "asia", "colombo": "asia",
-    "bangladesh": "asia",
-    "pakistan": "asia", "karachi": "asia",
-    "mongolia": "asia", "ulaanbaatar": "asia",
-    "bhutan": "asia",
-    "maldives": "asia",
-    "east asia": "asia", "southeast asia": "asia", "south asia": "asia",
-    "southeastasia": "asia", "eastasia": "asia",
+    "asia": "asia",
+    "asian": "asia",
+    "chiangmai": "asia",
+    "east asia": "asia",
+    "eastasia": "asia",
+    "hochiminh": "asia",
+    "korea": "asia",
+    "lombok": "asia",
+    "palawan": "asia",
+    "philippine": "asia",
+    "south asia": "asia",
+    "southeast asia": "asia",
+    "southeastasia": "asia",
     # Africa
-    "africa": "africa", "african": "africa",
-    "egypt": "africa", "egyptian": "africa", "cairo": "africa",
-    "morocco": "africa", "moroccan": "africa", "marrakech": "africa", "casablanca": "africa", "fez": "africa",
-    "kenya": "africa", "kenyan": "africa", "nairobi": "africa",
-    "tanzania": "africa", "tanzanian": "africa", "dar es salaam": "africa", "zanzibar": "africa",
-    "nigeria": "africa", "nigerian": "africa", "lagos": "africa",
-    "ethiopia": "africa", "ethiopian": "africa", "addis ababa": "africa",
-    "ghana": "africa", "ghanaian": "africa", "accra": "africa",
-    "tunisia": "africa", "tunisian": "africa", "tunis": "africa",
-    "namibia": "africa", "windhoek": "africa",
-    "senegal": "africa", "senegalese": "africa", "dakar": "africa",
-    "mauritius": "africa",
-    "south africa": "africa", "cape town": "africa", "johannesburg": "africa",
+    "africa": "africa",
+    "african": "africa",
+    "lagos": "africa",
+    "nigeria": "africa",
+    "nigerian": "africa",
+    "north africa": "africa",
     "southafrica": "africa",
-    "rwanda": "africa", "kigali": "africa",
-    "uganda": "africa", "kampala": "africa",
-    "mozambique": "africa", "maputo": "africa",
-    "zambia": "africa", "lusaka": "africa",
-    "zimbabwe": "africa", "harare": "africa",
-    "botswana": "africa", "gaborone": "africa",
-    "madagascar": "africa",
-    "seychelles": "africa",
-    "cameroon": "africa",
-    "ivory coast": "africa", "abidjan": "africa",
-    "north africa": "africa", "sub-saharan": "africa",
+    "sub-saharan": "africa",
     # North America
-    "america": "north_america", "american": "north_america",
-    "usa": "north_america", "unitedstates": "north_america", "us": "north_america",
-    "new york": "north_america", "newyork": "north_america", "nyc": "north_america",
-    "los angeles": "north_america", "la": "north_america",
-    "chicago": "north_america", "miami": "north_america",
-    "san francisco": "north_america", "sanfrancisco": "north_america",
-    "boston": "north_america", "seattle": "north_america", "portland": "north_america",
-    "new orleans": "north_america", "las vegas": "north_america",
-    "canada": "north_america", "canadian": "north_america", "toronto": "north_america",
-    "vancouver": "north_america", "montreal": "north_america",
-    "mexico": "north_america", "mexican": "north_america", "mexico city": "north_america",
-    "cancun": "north_america", "guadalajara": "north_america",
-    "north": "north_america", "northamerica": "north_america",
-    "cuba": "north_america", "havana": "north_america",
+    "america": "north_america",
+    "american": "north_america",
+    "boston": "north_america",
     "caribbean": "north_america",
-    "costa rica": "north_america", "panama": "north_america",
-    "guatemala": "north_america", "honduras": "north_america",
-    "central america": "north_america", "centralamerica": "north_america",
+    "central america": "north_america",
+    "centralamerica": "north_america",
+    "guadalajara": "north_america",
+    "honduras": "north_america",
+    "la": "north_america",
+    "new orleans": "north_america",
+    "newyork": "north_america",
+    "north": "north_america",
+    "northamerica": "north_america",
+    "portland": "north_america",
+    "san francisco": "north_america",
+    "sanfrancisco": "north_america",
+    "seattle": "north_america",
+    "unitedstates": "north_america",
+    "us": "north_america",
     # South America
-    "south": "south_america", "southamerica": "south_america",
-    "latin": "south_america", "latinamerica": "south_america", "latin america": "south_america",
-    "brazil": "south_america", "brazilian": "south_america", "rio": "south_america",
-    "sao paulo": "south_america", "rio de janeiro": "south_america",
-    "argentina": "south_america", "argentine": "south_america", "buenos aires": "south_america",
-    "peru": "south_america", "peruvian": "south_america", "lima": "south_america", "cusco": "south_america",
-    "chile": "south_america", "chilean": "south_america", "santiago": "south_america",
-    "colombia": "south_america", "colombian": "south_america", "bogota": "south_america", "medellin": "south_america",
-    "bolivia": "south_america", "la paz": "south_america",
-    "ecuador": "south_america", "quito": "south_america",
-    "venezuela": "south_america", "caracas": "south_america",
-    "paraguay": "south_america", "uruguay": "south_america", "montevideo": "south_america",
-    "suriname": "south_america", "guyana": "south_america",
+    "latin": "south_america",
+    "latin america": "south_america",
+    "latinamerica": "south_america",
+    "rio de janeiro": "south_america",
+    "south": "south_america",
+    "southamerica": "south_america",
     # Oceania
+    "brisbane": "oceania",
+    "newzealand": "oceania",
     "oceania": "oceania",
-    "australia": "oceania", "australian": "oceania",
-    "sydney": "oceania", "melbourne": "oceania", "brisbane": "oceania", "perth": "oceania",
     "pacific": "oceania",
-    "new zealand": "oceania", "newzealand": "oceania", "auckland": "oceania", "wellington": "oceania",
-    "fiji": "oceania", "fijian": "oceania",
-    "papua new guinea": "oceania",
-    "samoa": "oceania", "tonga": "oceania", "vanuatu": "oceania",
+    "perth": "oceania",
     # Middle East
-    "middleeast": "middle_east", "middle east": "middle_east",
-    "arabian": "middle_east", "arabic": "middle_east",
+    "arabian": "middle_east",
+    "arabic": "middle_east",
+    "emirates": "middle_east",
     "gulf": "middle_east",
-    "dubai": "middle_east", "uae": "middle_east", "emirates": "middle_east",
-    "qatar": "middle_east", "doha": "middle_east",
-    "jordan": "middle_east", "amman": "middle_east", "petra": "middle_east",
-    "oman": "middle_east", "muscat": "middle_east",
-    "lebanon": "middle_east", "beirut": "middle_east",
-    "israel": "middle_east", "tel aviv": "middle_east", "jerusalem": "middle_east",
-    "saudi arabia": "middle_east", "riyadh": "middle_east",
-    "bahrain": "middle_east", "kuwait": "middle_east",
-    "iran": "middle_east", "tehran": "middle_east",
-    "iraq": "middle_east", "baghdad": "middle_east",
-    "turkey": "middle_east", "turkish": "middle_east", "istanbul": "middle_east", "ankara": "middle_east",
+    "middle east": "middle_east",
+    "middleeast": "middle_east",
 }
 
 BUDGET_SYNONYMS = {
@@ -456,31 +670,3 @@ SEASON_SYNONYMS = {
     "holiday season": "december",
     "peak summer": "july",
 }
-
-def season_to_months(season_key):
-    """Convert a season/month key to a list of month numbers."""
-    if season_key in SEASON_MONTHS:
-        return SEASON_MONTHS[season_key]
-    if season_key in MONTH_NUMBER:
-        return [MONTH_NUMBER[season_key]]
-    return []
-
-# Multi-word phrase aliases
-CONTINENT_SYNONYMS.update({
-    "latinamerica": "south_america",
-    "centralamerica": "north_america",
-    "northamerica": "north_america",
-    "southamerica": "south_america",
-    "middleeast": "middle_east",
-    "newzealand": "oceania",
-    "unitedstates": "north_america",
-    "southeast asia": "asia",
-    "east asia": "asia",
-    "south asia": "asia",
-    "north africa": "africa",
-    "south africa": "africa",
-    "central america": "north_america",
-    "latin america": "south_america",
-    "middle east": "middle_east",
-    "new zealand": "oceania",
-})

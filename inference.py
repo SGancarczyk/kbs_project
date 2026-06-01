@@ -269,26 +269,48 @@ def forward_chain(initial_facts, advisory_rules):
 
 
 def recommend(destinations, query, top_n=5):
-    # 1) crisp region filter, with a FALLBACK: if the user named regions but none
-    # match, we drop the include filter (still honouring excluded regions) and
+    # 1) crisp filter, with a FALLBACK: if the user named regions/countries but
+    # none match, we drop the include filter (still honouring exclusions) and
     # flag that we broadened the search. 2) score, 3) sort, 4) advisory rules
     # using facts from BOTH the request and the results.
+    #
+    # NEW: countries_include / countries_exclude work exactly like their region
+    # counterparts but filter on dest["country"] instead of dest["region"].
+    # Country filtering is checked FIRST (more specific), then region filtering.
+    # If a country filter is active the region filter is skipped for that dest
+    # because the country already implies the region.
     include = query.get("regions_include") or []
     exclude = query.get("regions_exclude") or []
+    countries_include = query.get("countries_include") or []
+    countries_exclude = query.get("countries_exclude") or []
 
     def build_pool(apply_include):
         pool = []
         for dest in destinations:
-            if apply_include and include and dest["region"] not in include:
+            # Country exclusion: drop if the city's country is in the exclude list.
+            if dest["country"] in countries_exclude:
                 continue
+            # Region exclusion: drop if the city's region is in the exclude list.
             if dest["region"] in exclude:
                 continue
+            if apply_include:
+                # If a country include list is active, use it as the primary
+                # filter (exact match on country). A city that passes the country
+                # filter is automatically included regardless of region filter,
+                # because "I want Japan" implies the right region already.
+                if countries_include:
+                    if dest["country"] not in countries_include:
+                        continue
+                elif include and dest["region"] not in include:
+                    # No country filter — fall back to the normal region filter.
+                    continue
             pool.append(dest)
         return pool
 
     broadened = False
     pool = build_pool(True)
-    if include and not pool:
+    # FALLBACK: if include filters produced an empty pool, broaden the search.
+    if (include or countries_include) and not pool:
         pool = build_pool(False)
         broadened = True
     scored = []

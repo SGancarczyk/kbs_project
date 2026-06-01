@@ -23,7 +23,13 @@ import inference as inf
 
 # Words that mean "I have no preference for the thing you just asked" - they let
 # the user SKIP a slot instead of being forced to answer (un-menu-like).
-SKIP_WORDS = {"any", "anywhere", "whatever", "skip", "none", "no", "nope", "idk", "anything"}
+SKIP_WORDS = {"any", "anywhere", "whatever", "skip", "none", "no", "nope", "idk", "anything",
+             # Added: filler/function words that appear alongside skip-intent words
+             # e.g. "i don't mind" -> ["i", "do", "n't", "mind"] -> "i","do","mind" after isalpha()
+             "i", "do", "dont", "mind", "open", "to", "fine", "sure",
+             "ok", "okay", "good", "up", "you", "me", "just", "not",
+             "really", "care", "worry", "worries", "bother", "fussed",
+             "doesnt", "does", "matter", "n't"}
 SKIP_PHRASES = {"doesn't matter", "does not matter", "dont care", "don't care", "do not care", "no preference", "not sure",
                 # Apostrophe-free / texting variants so casual phrasing still
                 # registers as "no preference" instead of confusing the bot.
@@ -183,6 +189,10 @@ class TravelChatbot:
         self.query = {
             "regions_include": [],
             "regions_exclude": [],
+            # NEW: country-level include/exclude mirrors region include/exclude
+            # but filters on the dataset "country" column for exact country pins.
+            "countries_include": [],
+            "countries_exclude": [],
             "climate": [],
             "climate_exclude": [],
             "budget": [],
@@ -191,7 +201,7 @@ class TravelChatbot:
             "duration_exclude": [],
             "lifestyle": {},
             "lifestyle_exclude": [],
-            # NEW: travel_months stores the month numbers (1-12) extracted from
+            # travel_months stores the month numbers (1-12) extracted from
             # the season slot so the inference engine can use seasonal temperature
             # data instead of the yearly average when scoring climate.
             "travel_months": [],
@@ -206,6 +216,10 @@ class TravelChatbot:
         # the user never has to reject the same place twice. Cleared on restart
         # because reset() rebuilds it as an empty set.
         self.rejected_cities = set()
+        # Tracks which slots the user explicitly skipped (answered with a skip
+        # phrase like "open to anything") so _slot_filled() can distinguish
+        # "not yet answered" from "deliberately left open".
+        self._skipped = {}
         # Counter used to rotate the friendly openers in _acknowledge() so the
         # confirmations vary instead of always starting the same way.
         self._ack_index = 0
@@ -217,7 +231,14 @@ class TravelChatbot:
     # Questions are written to invite a full sentence rather than a keyword.
     def _slots(self):
         return [
+            # continent is asked first; if the user already named a country in
+            # the same message the continent slot fills automatically via
+            # country_to_region() in _update_slots, so this question is skipped.
             ("continent", "Do you already have a region in mind? You can mention somewhere specific like Europe or Southeast Asia, or just say you're open to anything."),
+            # country is asked after continent. Skipped if a country was already
+            # named (slot filled) OR if the user skipped the continent question
+            # (meaning they are open to anywhere — no point narrowing to a country).
+            ("country",   "Is there a particular country you have in mind, or are you happy to explore across a whole region?"),
             ("season",    "When are you hoping to travel? Even a rough idea like a season or month is helpful."),
             ("duration",  "How long are you thinking of going for?"),
             ("budget",    "What kind of budget are you working with? For example, are you looking to keep costs down, or is it more of a treat yourself trip?"),
@@ -230,6 +251,19 @@ class TravelChatbot:
         # or as an explicit exclusion?
         if slot == "continent":
             return bool(self.query["regions_include"]) or bool(self.query["regions_exclude"])
+        # The country slot is filled when:
+        #   a) at least one country was already named (include or exclude), OR
+        #   b) the continent question was explicitly skipped — if the user said
+        #      "open to anything" at the continent stage they clearly don't want
+        #      to narrow down to a country either, so don't ask.
+        # We do NOT skip when regions_include is filled — that's exactly the case
+        # where we want to ask "any specific country within that region?"
+        if slot == "country":
+            country_given = bool(self.query["countries_include"]) or bool(self.query["countries_exclude"])
+            continent_skipped = (not self.query["regions_include"] and
+                                 not self.query["regions_exclude"] and
+                                 self._skipped.get("continent", False))
+            return country_given or continent_skipped
         # The season slot is filled when at least one travel month was extracted.
         if slot == "season":
             return bool(self.query["travel_months"])
@@ -291,6 +325,11 @@ class TravelChatbot:
         if self.last_results and self.last_results.get("results"):
             if self._has_rejection_cue(t) and self._cities_to_reject(text):
                 return "reject_city"
+        # MORE LIKE: "more like kyoto", "similar to paris"
+        if "like " in t or "similar to " in t:
+            for dest in self.destinations:
+                if dest["city"].lower() in t:
+                    return "more_like"
         # Anything else is treated as the user giving us preferences.
         return "provide"
 
@@ -341,15 +380,15 @@ class TravelChatbot:
     def _is_skip(self, text):
         # True if the whole message means "no preference here".
         t = text.lower().strip()
-        # Run the SAME informal-shorthand normalization the NLP layer uses BEFORE
-        # matching, so casual variants are folded into their plain-English form
-        # (e.g. "dont care" stays caught, and any shorthand the table expands no
-        # longer slips past the skip check). This keeps skip detection in sync
-        # with how preferences are parsed everywhere else.
+        # Normalize informal shorthand first so "idc", "w/e" etc. are caught.
         t = nlp._normalize_common_phrases(t)
         if t in SKIP_PHRASES:
             return True
-        tokens = t.split()
+        # REWRITE: use word_tokenize instead of t.split() so contractions are
+        # split correctly — "don't" becomes ["do", "n't"] rather than staying as
+        # a single token that SKIP_WORDS doesn't contain. This means "i don't
+        # mind", "open to anything" etc. are now correctly identified as skips.
+        tokens = [tok for tok in nlp.tokenize(t) if tok.isalpha()]
         return len(tokens) > 0 and all(tok in SKIP_WORDS for tok in tokens)
 
     def _is_skip_all(self, text):
@@ -360,13 +399,6 @@ class TravelChatbot:
             return True
         return "skip" in t and ("all" in t or "rest" in t or "everything" in t)
 
-    def _allow_spellcheck_for(self, slot):
-        # The spell corrector is now conservative enough to run across slots: it
-        # requires close normalized edit distance, avoids tiny target words, and
-        # keeps first/last letters for normal corrections. This lets all-in-one
-        # sentences with typos, such as "chaep asia cuisine", still fill budget.
-        return True
-
     def _blocking_vocabulary_for(self, keyword_map):
         # All vocabulary keys except the current slot. Used by nlp.extract so a
         # negation aimed at another category does not leak into this category.
@@ -374,6 +406,7 @@ class TravelChatbot:
         # a continent or lifestyle extraction.
         all_maps = [
             kb.CONTINENT_SYNONYMS,
+            kb.COUNTRY_SYNONYMS,   # NEW: country keywords block each other's negation
             kb.CLIMATE_SYNONYMS,
             kb.BUDGET_SYNONYMS,
             kb.DURATION_SYNONYMS,
@@ -392,6 +425,7 @@ class TravelChatbot:
         # needed for a meaningful recommendation.
         return any([
             self.query["regions_include"], self.query["regions_exclude"],
+            self.query["countries_include"], self.query["countries_exclude"],   # NEW
             self.query["climate"], self.query["climate_exclude"],
             self.query["budget"], self.query["budget_exclude"],
             self.query["duration"], self.query["duration_exclude"],
@@ -404,11 +438,10 @@ class TravelChatbot:
     def _extract_season(self, text):
         # Run the NLP extractor over the SEASON_SYNONYMS vocabulary and convert
         # every matched key ("july", "summer", ...) into a list of month numbers
-        # via knowledge_base.season_to_months(). No spellcheck: month/season
+        # via knowledge_base.season_to_months().
         # names are short and exact matches are safer here.
         result = nlp.extract(
             text, kb.SEASON_SYNONYMS,
-            allow_spellcheck=False,
             blocking_vocabulary=self._blocking_vocabulary_for(kb.SEASON_SYNONYMS),
         )
         months = []
@@ -424,16 +457,18 @@ class TravelChatbot:
         # "avoid nightlife" affect the final reasoning instead of being lost.
         changed = {
             "regions_include": [], "regions_exclude": [],
+            # NEW: tracks countries newly added this turn for _acknowledge().
+            "countries_include": [], "countries_exclude": [],
             "climate": [], "climate_exclude": [],
             "budget": [], "budget_exclude": [],
             "duration": [], "duration_exclude": [],
             "lifestyle": [], "lifestyle_exclude": [],
-            # NEW: tracks which travel months were newly added this turn so
+            # tracks which travel months were newly added this turn so
             # _acknowledge() can confirm them back to the user.
             "travel_months": [],
         }
 
-        cont = nlp.extract(text, kb.CONTINENT_SYNONYMS, allow_spellcheck=self._allow_spellcheck_for("continent"), blocking_vocabulary=self._blocking_vocabulary_for(kb.CONTINENT_SYNONYMS))
+        cont = nlp.extract(text, kb.CONTINENT_SYNONYMS, blocking_vocabulary=self._blocking_vocabulary_for(kb.CONTINENT_SYNONYMS))
         for v in cont["include"]:
             if v not in self.query["regions_include"]:
                 self.query["regions_include"].append(v)
@@ -443,7 +478,36 @@ class TravelChatbot:
                 self.query["regions_exclude"].append(v)
                 changed["regions_exclude"].append(v)
 
-        clim = nlp.extract(text, kb.CLIMATE_SYNONYMS, allow_spellcheck=self._allow_spellcheck_for("climate"), blocking_vocabulary=self._blocking_vocabulary_for(kb.CLIMATE_SYNONYMS))
+        # COUNTRY: tokens only match COUNTRY_SYNONYMS (no overlap with
+        # CONTINENT_SYNONYMS), so "japan" always resolves to the country Japan
+        # and never accidentally fills the continent slot with "asia" directly.
+        # When a country IS found, we derive its region and add it to
+        # regions_include automatically — this fills the continent slot so the
+        # bot never asks "which region?" after the user already named a country.
+        # Multiple countries from different continents are fully supported: each
+        # country appends its own region, so regions_include may end up with
+        # ["asia", "south_america"] if the user names e.g. Japan and Brazil.
+        cntry = nlp.extract(text, kb.COUNTRY_SYNONYMS,
+                            blocking_vocabulary=self._blocking_vocabulary_for(kb.COUNTRY_SYNONYMS))
+        for v in cntry["include"]:
+            if v not in self.query["countries_include"]:
+                self.query["countries_include"].append(v)
+                changed["countries_include"].append(v)
+            # Derive region and add to regions_include if not already present.
+            # This fills the continent slot automatically and supports multiple
+            # countries from different continents in the same query.
+            region = kb.country_to_region(v)
+            if region and region not in self.query["regions_include"]:
+                self.query["regions_include"].append(region)
+                changed["regions_include"].append(region)
+        for v in cntry["exclude"]:
+            if v not in self.query["countries_exclude"]:
+                self.query["countries_exclude"].append(v)
+                changed["countries_exclude"].append(v)
+            # Also exclude the region if ALL countries in that region are excluded
+            # (edge case — left to inference engine to handle gracefully).
+
+        clim = nlp.extract(text, kb.CLIMATE_SYNONYMS, blocking_vocabulary=self._blocking_vocabulary_for(kb.CLIMATE_SYNONYMS))
         for v in clim["include"]:
             if v not in self.query["climate"]:
                 self.query["climate"].append(v)
@@ -453,7 +517,7 @@ class TravelChatbot:
                 self.query["climate_exclude"].append(v)
                 changed["climate_exclude"].append(v)
 
-        bud = nlp.extract(text, kb.BUDGET_SYNONYMS, allow_spellcheck=self._allow_spellcheck_for("budget"), blocking_vocabulary=self._blocking_vocabulary_for(kb.BUDGET_SYNONYMS))
+        bud = nlp.extract(text, kb.BUDGET_SYNONYMS, blocking_vocabulary=self._blocking_vocabulary_for(kb.BUDGET_SYNONYMS))
         for v in bud["include"]:
             if v not in self.query["budget"]:
                 self.query["budget"].append(v)
@@ -463,13 +527,9 @@ class TravelChatbot:
                 self.query["budget_exclude"].append(v)
                 changed["budget_exclude"].append(v)
 
-        # DURATION is the one slot we never fill from a spell-corrected guess.
-        # Duration keywords are short ("day", "week", "long", "short") and prone
-        # to false positives (e.g. "sports" -> "short", "do" -> "day"), and the
-        # bot should ASK about trip length rather than infer it from an unrelated
-        # word. So we force allow_spellcheck=False: duration is only filled when
-        # the user writes an actual duration word, exactly matched.
-        dur = nlp.extract(text, kb.DURATION_SYNONYMS, allow_spellcheck=False, blocking_vocabulary=self._blocking_vocabulary_for(kb.DURATION_SYNONYMS))
+        # DURATION: relies on exact token/lemma matches only (no spell correction).
+        # Duration keywords are short and prone to false positives if corrected.
+        dur = nlp.extract(text, kb.DURATION_SYNONYMS, blocking_vocabulary=self._blocking_vocabulary_for(kb.DURATION_SYNONYMS))
         for v in dur["include"]:
             if v not in self.query["duration"]:
                 self.query["duration"].append(v)
@@ -479,7 +539,7 @@ class TravelChatbot:
                 self.query["duration_exclude"].append(v)
                 changed["duration_exclude"].append(v)
 
-        life = nlp.extract(text, kb.LIFESTYLE_SYNONYMS, allow_spellcheck=self._allow_spellcheck_for("lifestyle"), blocking_vocabulary=self._blocking_vocabulary_for(kb.LIFESTYLE_SYNONYMS))
+        life = nlp.extract(text, kb.LIFESTYLE_SYNONYMS, blocking_vocabulary=self._blocking_vocabulary_for(kb.LIFESTYLE_SYNONYMS))
         for v in life["include"]:
             if v not in self.query["lifestyle"]:
                 self.query["lifestyle"][v] = 5
@@ -489,7 +549,7 @@ class TravelChatbot:
                 self.query["lifestyle_exclude"].append(v)
                 changed["lifestyle_exclude"].append(v)
 
-        # SEASON: no spellcheck (see _extract_season). Month numbers are stored
+        # SEASON: month numbers are stored
         # in the query; the inference engine picks up the right monthly temp data.
         months = self._extract_season(text)
         for m in months:
@@ -537,9 +597,16 @@ class TravelChatbot:
         # clauses together with proper commas/"and".
         clauses = []
         # --- positive wishes (what the user DOES want) ---
-        if changed["regions_include"]:
-            # Proper-case the regions so they read like place names.
-            clauses.append(_join_natural([_pretty_region(r) for r in changed["regions_include"]]))
+        if changed["countries_include"]:
+            # Country names are already properly capitalised in the KB.
+            clauses.append(_join_natural(changed["countries_include"]))
+        
+        # Only show regions that aren't the parent region of a newly added country
+        # This avoids saying "Japan, Asia" but allows "United States, Asia".
+        new_country_regions = {kb.country_to_region(c) for c in changed["countries_include"] if kb.country_to_region(c)}
+        explicit_regions = [r for r in changed["regions_include"] if r not in new_country_regions]
+        if explicit_regions:
+            clauses.append(_join_natural([_pretty_region(r) for r in explicit_regions]))
         if changed["budget"]:
             # "Budget" -> "on a budget", "Luxury" -> "luxury", etc.
             clauses.append(_join_natural([_BUDGET_PHRASES.get(b, b.lower()) for b in changed["budget"]]))
@@ -555,6 +622,8 @@ class TravelChatbot:
         if changed["travel_months"]:
             clauses.append("travelling in " + self._season_label(changed["travel_months"]))
         # --- exclusions (what the user does NOT want) ---
+        if changed["countries_exclude"]:
+            clauses.append("not " + _join_natural(changed["countries_exclude"]))
         if changed["regions_exclude"]:
             clauses.append("not " + _join_natural([_pretty_region(r) for r in changed["regions_exclude"]]))
         if changed["budget_exclude"]:
@@ -697,6 +766,33 @@ class TravelChatbot:
             return payload
         return message + "\n" + payload
 
+    def _apply_similarity(self, text):
+        t = text.lower()
+        target_dest = None
+        for dest in self.destinations:
+            if dest["city"].lower() in t:
+                target_dest = dest
+                break
+        
+        if not target_dest:
+            return "I couldn't find that city in my database."
+
+        self.query["budget"] = [target_dest["budget_level"]]
+        self.query["climate"] = [target_dest["climate"]]
+        
+        self.query["lifestyle"] = {}
+        strong_dims = []
+        for dim in kb.LIFESTYLE_DIMENSIONS:
+            if target_dest.get(dim, 0) >= 4:
+                self.query["lifestyle"][dim] = 5
+                strong_dims.append(dim)
+        
+        self.rejected_cities.add(target_dest["city"])
+        
+        dims_text = _join_natural(strong_dims)
+        budget_text = target_dest["budget_level"].lower() if target_dest["budget_level"] != "Mid-range" else "mid-range"
+        return f"Got it. Looking for places with a similar vibe to {target_dest['city']} (strong on {dims_text}, {budget_text} budget, {target_dest['climate']} climate)."
+
     def respond(self, text):
         # THE MAIN ENTRY POINT. Given one user message, return the bot's reply.
         # The reply is normally a STRING, but a successful recommendation is a
@@ -718,6 +814,9 @@ class TravelChatbot:
             return self._explain_last()
         if intent == "recommend":
             return self._format_recommendation()
+        if intent == "more_like":
+            ack = self._apply_similarity(text)
+            return self._lead(ack, self._format_recommendation())
         if intent == "greet":
             return "Hello! " + (self._next_question() or "Tell me about the kind of trip you have in mind and I'll suggest some destinations.")
         # SMALL TALK: pick a random reply from the matching set, then append the
