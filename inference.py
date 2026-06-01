@@ -17,11 +17,20 @@
 #     "budget": [...], "budget_exclude": [...],
 #     "duration": [...], "duration_exclude": [...],
 #     "lifestyle": {dim: importance 1..5},
-#     "lifestyle_exclude": [...] }
+#     "lifestyle_exclude": [...],
+#     "travel_months": [1..12, ...] }   <- NEW: set by the season slot
+#
+# IMPROVEMENT: when travel_months is present, score_destination() uses the
+# city's actual temperature for those months (from avg_temp_monthly in the
+# Knowledge Base) rather than the yearly average. This means "warm in December"
+# correctly favours Sydney over Stockholm, for example.
 # ----------------------------------------------------------------------------
 import math
 import fuzzy
 import rules
+import knowledge_base as kb
+
+
 def cosine_similarity(a, b):
     # ANGLE between two vectors, ignoring length: same direction -> 1.0,
     # perpendicular -> 0.0. dot(a,b) / (|a| * |b|).
@@ -31,9 +40,13 @@ def cosine_similarity(a, b):
     if norm_a == 0 or norm_b == 0:
         return 0.0
     return dot / (norm_a * norm_b)
+
+
 def cf_propagate(rule_cf, evidence):
     # Simple CF propagation: rule reliability x evidence strength.
     return rule_cf * evidence
+
+
 def evidence_cf_from_membership(membership, rule_cf):
     # Turn a fuzzy membership (0..1) into SIGNED certainty-factor evidence using
     # the course definition CF = MB - MD. We read the membership as the Measure
@@ -43,6 +56,8 @@ def evidence_cf_from_membership(membership, rule_cf):
     # half match (m=0.5) is neutral (0). We then multiply by how reliable this
     # kind of rule is (propagation). Result lies in [-rule_cf, +rule_cf].
     return rule_cf * (2 * membership - 1)
+
+
 def cf_combine(cf1, cf2):
     # Combine two certainty factors that bear on the SAME conclusion, using the
     # three MYCIN cases from the slides:
@@ -57,6 +72,8 @@ def cf_combine(cf1, cf2):
     if denominator == 0:
         return 0.0
     return (cf1 + cf2) / denominator
+
+
 def cf_combine_many(cfs):
     # Fold cf_combine across a list of evidence CFs (starting from 0 = "no
     # opinion"). Each fold step applies whichever of the THREE MYCIN cases fits
@@ -66,6 +83,8 @@ def cf_combine_many(cfs):
     for cf in cfs:
         total = cf_combine(total, cf)
     return total
+
+
 def _negative_cf_from_membership(membership, rule_cf):
     # For explicit exclusions, high membership is bad. A city that strongly has
     # something the user rejected receives strong negative evidence; a city that
@@ -83,6 +102,23 @@ def _effective_budget_preferences(query):
     return budgets
 
 
+def _effective_temp(dest, query):
+    # NEW: return the temperature that should be used for climate scoring.
+    # If the user specified travel months (via the season slot), we look up
+    # the city's average temperature specifically for those months from the
+    # monthly data stored in the Knowledge Base. This is more accurate than
+    # the yearly average because seasonal variation matters: a city that is
+    # warm in July may be cold in December.
+    # If no months were given we fall back to the yearly average, which is
+    # exactly the original behaviour so nothing breaks for existing queries.
+    months = query.get("travel_months") or []
+    if months:
+        seasonal = kb.seasonal_avg_temp(dest["avg_temp_monthly"], months)
+        if seasonal is not None:
+            return seasonal
+    return dest["avg_temp_yearly"]
+
+
 def score_destination(dest, query):
     # Score ONE destination. Included preferences become signed CF evidence.
     # Explicit exclusions become negative evidence. Missing criteria add no
@@ -91,14 +127,31 @@ def score_destination(dest, query):
     details = {}
     include_memberships = {}
 
+    # CLIMATE: use _effective_temp() so that a travel month/season narrows the
+    # temperature to the relevant period instead of the yearly average.
+    # Both the include and exclude paths go through the same helper so they are
+    # always consistent with each other.
     if query.get("climate"):
-        m = fuzzy.fuzzy_or([fuzzy.climate_membership(dest["avg_temp_yearly"], t) for t in query["climate"]])
+        temp = _effective_temp(dest, query)
+        m = fuzzy.fuzzy_or([fuzzy.climate_membership(temp, t) for t in query["climate"]])
         cf = evidence_cf_from_membership(m, rules.RULE_CF["climate"])
         evidences.append(cf)
         details["climate"] = (m, cf)
         include_memberships["climate"] = m
+    elif query.get("travel_months"):
+        # Even without an explicit climate preference, knowing the travel month
+        # lets us give a small nudge toward cities with pleasant weather at that
+        # time of year. We score against "mild" as a neutral baseline and scale
+        # the influence down to 30 % of its normal weight so it only breaks ties
+        # rather than dominating the ranking.
+        temp = _effective_temp(dest, query)
+        m = fuzzy.climate_membership(temp, "mild")
+        cf = evidence_cf_from_membership(m, rules.RULE_CF["climate"]) * 0.3
+        evidences.append(cf)
+        details["seasonal_temp"] = (m, cf)
     if query.get("climate_exclude"):
-        m = fuzzy.fuzzy_or([fuzzy.climate_membership(dest["avg_temp_yearly"], t) for t in query["climate_exclude"]])
+        temp = _effective_temp(dest, query)
+        m = fuzzy.fuzzy_or([fuzzy.climate_membership(temp, t) for t in query["climate_exclude"]])
         cf = _negative_cf_from_membership(m, rules.RULE_CF["climate"])
         evidences.append(cf)
         details["climate_exclude"] = (m, cf)
@@ -165,6 +218,8 @@ def score_destination(dest, query):
         "criteria_given": bool(evidences),
         "hard_failures": hard_failures,
     }
+
+
 def build_working_memory(query):
     # Turn the query into symbolic FACTS for the forward-chaining advisory rules.
     facts = set()
@@ -184,6 +239,8 @@ def build_working_memory(query):
         if weight >= 4:
             facts.add("wants:" + dim)
     return facts
+
+
 def forward_chain(initial_facts, advisory_rules):
     # FORWARD CHAINING. Start from known facts; repeatedly fire every rule whose
     # "if" facts are ALL present and whose "then" is new; add that fact. Loop
@@ -209,6 +266,8 @@ def forward_chain(initial_facts, advisory_rules):
                 changed = True
     messages = [m for _, m in sorted(messages, key=lambda x: -x[0])]
     return facts, fired, messages
+
+
 def recommend(destinations, query, top_n=5):
     # 1) crisp region filter, with a FALLBACK: if the user named regions but none
     # match, we drop the include filter (still honouring excluded regions) and
@@ -216,6 +275,7 @@ def recommend(destinations, query, top_n=5):
     # using facts from BOTH the request and the results.
     include = query.get("regions_include") or []
     exclude = query.get("regions_exclude") or []
+
     def build_pool(apply_include):
         pool = []
         for dest in destinations:
@@ -225,6 +285,7 @@ def recommend(destinations, query, top_n=5):
                 continue
             pool.append(dest)
         return pool
+
     broadened = False
     pool = build_pool(True)
     if include and not pool:
@@ -247,6 +308,8 @@ def recommend(destinations, query, top_n=5):
         facts.add("results:weak")
     _, fired, messages = forward_chain(facts, rules.ADVISORY_RULES)
     return {"pool_size": len(pool), "results": top, "advisories": messages, "fired_rules": fired, "broadened": broadened}
+
+
 def explain(dest, result, query):
     # EXPLANATION FACILITY: a human sentence justifying the pick, now showing the
     # membership AND the signed certainty factor of every piece of evidence, plus
@@ -307,17 +370,37 @@ def explain_human(dest, score, query):
     bullets = []  # list of (abs_cf, text); we sort by abs_cf and keep the top 4
 
     # --- CLIMATE (fuzzy temperature match) ---
+    # NEW: if travel months were given, the membership was computed against the
+    # seasonal temperature rather than the yearly average, so we label the bullet
+    # accordingly so the user can see which figure was actually used.
     if "climate" in details:
         m, cf = details["climate"]
         if cf <= -0.1:
             bullets.append((abs(cf), "⚠️ Climate — not an ideal fit"))
         elif abs(cf) >= 0.05:
             label = dest.get("climate", "")
-            temp = dest.get("avg_temp_yearly")
-            # The temperature is a factual attribute (not a membership/CF), so it
-            # is fine to show; the membership itself stays hidden behind words.
+            months = query.get("travel_months") or []
+            if months:
+                # Show the seasonal temperature rather than the yearly average
+                # so the explanation matches what the engine actually scored on.
+                temp = kb.seasonal_avg_temp(dest["avg_temp_monthly"], months)
+                temp_str = (str(round(temp, 1)) + "°C for your travel period") if temp is not None else label
+            else:
+                temp = dest.get("avg_temp_yearly")
+                temp_str = str(temp) + "°C yearly average"
             bullets.append((abs(cf), "🌡 Climate — " + _quality_word(m)
-                            + " (" + label + ", " + str(temp) + "°C yearly average)"))
+                            + " (" + label + ", " + temp_str + ")"))
+
+    # --- SEASONAL TEMP NUDGE (travel months given but no explicit climate pref) ---
+    # NEW: when only a travel month was given (no explicit climate preference),
+    # score_destination() adds a small "seasonal_temp" entry. We surface it here
+    # as a lightweight note so the user understands why seasonality played a role.
+    if "seasonal_temp" in details:
+        m, cf = details["seasonal_temp"]
+        if abs(cf) >= 0.05:
+            temp = kb.seasonal_avg_temp(dest["avg_temp_monthly"], query.get("travel_months") or [])
+            temp_str = (str(round(temp, 1)) + "°C") if temp is not None else "n/a"
+            bullets.append((abs(cf), "🌡 Seasonal temperature — " + temp_str + " during your travel period"))
 
     # --- BUDGET (ordinal fuzzy match) ---
     if "budget" in details:
