@@ -294,6 +294,41 @@ No meaningful changes between old and new versions.
 
 
 ================================================================
+BUG FIXES (applied during review session)
+================================================================
+
+1. nlp.py — allow_spellcheck PARAMETER MISSING FROM extract()
+   The public API comment and chatbot.py both expected the signature
+       extract(text, keyword_map, allow_spellcheck=True, blocking_vocabulary=None)
+   but the actual function was defined as
+       extract(text, keyword_map, blocking_vocabulary=None)
+   causing a TypeError on every call from chatbot.py.
+   Fix: added allow_spellcheck=True as a keyword argument (parameter accepted
+   but not yet used, consistent with the "spell correction removed" note above).
+
+2. chatbot.py — _skipped DICT NOT INITIALISED IN reset()
+   self._skipped was read in _slot_filled() and _next_question() but never
+   created in reset(), raising AttributeError: 'TravelChatbot' object has no
+   attribute '_skipped' the first time a slot was checked.
+   Fix: added self._skipped = {} to reset().
+
+3. chatbot.py — COUNTRY EXTRACTION NEVER WIRED INTO _update_slots()
+   COUNTRY_SYNONYMS and the countries_include / countries_exclude query keys
+   were defined in knowledge_base.py and inference.py respectively, but
+   _update_slots() never called nlp.extract() with COUNTRY_SYNONYMS, so
+   typing "japan" filled nothing and the continent question was asked again.
+   Fix:
+   - Added countries_include / countries_exclude to self.query in reset()
+     and to the changed dict in _update_slots().
+   - Added nlp.extract(text, kb.COUNTRY_SYNONYMS, allow_spellcheck=False)
+     call in _update_slots() to populate those keys.
+   - Updated _slot_filled("continent") to return True when countries_include
+     or countries_exclude is non-empty (a country implies a region).
+   - Updated _acknowledge() to confirm the matched country name back to the
+     user (e.g. "Got it. Japan, on a budget, a week-long trip.").
+
+
+================================================================
 SUMMARY TABLE
 ================================================================
 
