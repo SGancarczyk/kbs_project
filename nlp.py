@@ -167,7 +167,7 @@ def _match_exact_at(raw_tokens, lemma_tokens, start, keyword_map):
     return None, 0
 
 
-def extract(text, keyword_map, blocking_vocabulary=None):
+def extract(text, keyword_map, allow_spellcheck=True, blocking_vocabulary=None):
     # Returns canonical values the user wants to include and avoid:
     # {"include": [...], "exclude": [...]}. blocking_vocabulary
     # contains keywords from all other slots; it prevents negation from leaking
