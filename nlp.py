@@ -5,41 +5,69 @@
 # normalize, tokenize, lemmatize, match domain vocabulary, correct small typos,
 # and handle negation such as "not asia" or "avoid nightlife".
 #
-# REWRITE: replaced hand-rolled normalize/tokenize/lemmatize with standard NLP
-# libraries from the course notebooks (NLP_Hands_on__3_.ipynb, chatbot__4_.ipynb):
-#   - normalize() / tokenize()  : replaced with nltk.word_tokenize()
-#   - lemmatize()               : replaced with WordNetLemmatizer.lemmatize()
-#                                 using nltk.pos_tag() to pick the correct POS
+# NLP libraries used (allowed by the course as assisting NLP tools): NLTK for
+# tokenization and lemmatization.
+#   - tokenize()  : nltk.word_tokenize() (handles contractions/punctuation)
+#   - lemmatize() : WordNetLemmatizer.lemmatize() guided by nltk.pos_tag()
+# Everything else (vocabulary matching, negation propagation, multi-word phrase
+# matching, blocking vocabulary, and the conservative spell corrector) is our
+# own code.
 #
-# 2. Spell-checking is disconnected The comments at the top of nlp.py claim that
-# spell correction was kept from the original version. However, while the helper
-# function _one_adjacent_transposition_away exists, it is never actually called
-# inside the extract() function or _match_exact_at. The _spell_correct function
-# itself is completely missing.
+# PUBLIC API:
+#   extract(text, keyword_map, allow_spellcheck=True, blocking_vocabulary=None)
+#       -> {"include": [...], "exclude": [...]}
+#   _normalize_common_phrases(text) -> str
+#   edit_distance(a, b) -> int   (Levenshtein distance, used by the corrector)
 #
-# The PUBLIC API is IDENTICAL to the original so chatbot.py needs zero changes:
-#   extract(text, keyword_map, allow_spellcheck, blocking_vocabulary) -> dict
-#   _normalize_common_phrases(text)                                   -> str
-# All internal logic (negation propagation, multi-word phrase matching,
-# blocking vocabulary, negation connectors) is also preserved exactly.
+# NLTK DATA: the resources below are downloaded once on first import (silent if
+# already present). ensure_nltk_data() makes the failure mode explicit: in a
+# clean environment WITHOUT internet it raises a clear RuntimeError telling the
+# user which `nltk.download(...)` calls to run, instead of a cryptic LookupError
+# deep inside word_tokenize() later on. See README "Setup" for the exact commands.
 # ----------------------------------------------------------------------------
 import re
 import nltk
 from nltk.stem import WordNetLemmatizer
 from nltk.tokenize import word_tokenize
 
-# Download required NLTK data once (silent if already present).
-# punkt / punkt_tab              -> tokenizer models used by word_tokenize
-# averaged_perceptron_tagger_eng -> POS tagger used to guide lemmatization
-# wordnet                        -> lemma dictionary used by WordNetLemmatizer
-for _pkg in ("punkt", "punkt_tab", "averaged_perceptron_tagger",
-             "averaged_perceptron_tagger_eng", "wordnet"):
-    nltk.download(_pkg, quiet=True)
+# Resources we rely on: tokenizer models (punkt/punkt_tab), the POS tagger
+# (averaged_perceptron_tagger*), and the lemma dictionary (wordnet/omw-1.4).
+_REQUIRED_NLTK = ("punkt", "punkt_tab", "averaged_perceptron_tagger",
+                  "averaged_perceptron_tagger_eng", "wordnet", "omw-1.4")
+
+
+def ensure_nltk_data():
+    # Try to download every required resource once. nltk.download is a no-op when
+    # the data is already on disk, so this is cheap on repeat runs. If the data
+    # is missing AND we cannot fetch it (e.g. offline), we surface a single clear
+    # message with the exact commands to run, rather than letting a LookupError
+    # explode unexplained from inside the tokenizer on the first real sentence.
+    for pkg in _REQUIRED_NLTK:
+        try:
+            nltk.download(pkg, quiet=True)
+        except Exception:
+            # A network error here is not fatal yet — the resource may already be
+            # cached. We only complain (below) if it is genuinely unavailable.
+            pass
+    try:
+        word_tokenize("warm weather")             # smoke test: needs punkt + tagger
+        WordNetLemmatizer().lemmatize("beaches")   # smoke test: needs wordnet
+    except LookupError as exc:
+        raise RuntimeError(
+            "Required NLTK data is missing and could not be downloaded "
+            "automatically. Run this once with internet access:\n"
+            "    python -c \"import nltk; "
+            + "; ".join("nltk.download('" + p + "')" for p in _REQUIRED_NLTK)
+            + "\"\nOriginal error: " + str(exc)
+        ) from exc
+
+
+ensure_nltk_data()
 
 # Module-level singleton so we only construct it once per process.
 _lemmatizer = WordNetLemmatizer()
 
-NEGATION_WORDS = {"not", "no", "dont", "don't", "avoid", "without", "except", "never", "exclude", "hate", "skip"}
+NEGATION_WORDS = {"not", "no", "dont", "don't", "n't", "avoid", "without", "except", "never", "exclude", "hate", "skip"}
 NEGATION_CONNECTORS = {"or", "and", "nor"}
 
 
@@ -139,6 +167,64 @@ def _one_adjacent_transposition_away(token, candidate):
     return j == i + 1 and token[i] == candidate[j] and token[j] == candidate[i]
 
 
+def edit_distance(a, b):
+    # Classic Levenshtein distance: the minimum number of single-character
+    # insertions, deletions, or substitutions to turn string a into string b.
+    # Used by the conservative spell corrector below (and exercised by tests).
+    m, n = len(a), len(b)
+    # prev[j] = distance between a[:i] and b[:j]; we keep just one row to save space.
+    prev = list(range(n + 1))
+    for i in range(1, m + 1):
+        cur = [i] + [0] * n
+        for j in range(1, n + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1,        # deletion
+                         cur[j - 1] + 1,     # insertion
+                         prev[j - 1] + cost) # substitution / match
+        prev = cur
+    return prev[n]
+
+
+# Common English words that sit one edit away from a vocabulary keyword. We never
+# auto-correct these, so an ordinary word the user actually meant is not silently
+# rewritten into a travel keyword (the classic "like" -> "lake" -> nature trap).
+_SPELLCHECK_BLOCKLIST = {
+    "like", "lake", "want", "wants", "good", "great", "place", "places",
+    "there", "where", "these", "those", "thing", "things", "think", "really",
+    "about", "around", "would", "could", "should", "going", "visit", "trip",
+    "trips", "love", "need", "very", "some", "more", "make", "take", "time",
+}
+
+
+def _spell_correct(token, vocabulary):
+    # Conservative single-word spell correction. Returns a vocabulary key the
+    # token is *almost certainly* a typo of, or None.
+    #
+    # We deliberately correct ONLY the classic "swapped two adjacent letters"
+    # typo (e.g. "chaep" -> "cheap", "asai" -> "asia"). We do NOT correct general
+    # single-edit typos, because a one-letter substitution is too easily a
+    # different real word: "short" is one substitution from "sport", "bench" from
+    # "beach", and so on. Restricting to transpositions keeps the corrector
+    # genuinely useful while avoiding those false positives entirely.
+    #
+    # edit_distance() is still provided as a public helper (and exercised by the
+    # tests) — it just is not used to *trigger* a correction here.
+    #
+    # Extra guards: skip short/ambiguous tokens (< 5 chars) and a blocklist of
+    # common English words; require the candidate to be a single word >= 5 chars
+    # that shares the same first and last letter (an interior transposition).
+    if len(token) < 5 or token in _SPELLCHECK_BLOCKLIST:
+        return None
+    for candidate in vocabulary:
+        if " " in candidate or len(candidate) < 5:
+            continue
+        if candidate[0] != token[0] or candidate[-1] != token[-1]:
+            continue
+        if _one_adjacent_transposition_away(token, candidate):
+            return candidate
+    return None
+
+
 
 
 def _add_unique(target, value):
@@ -174,6 +260,11 @@ def extract(text, keyword_map, allow_spellcheck=True, blocking_vocabulary=None):
     # across categories, e.g. "not expensive, South America" should not exclude
     # South America when we are extracting regions.
     #
+    # allow_spellcheck enables the conservative single-word corrector (see
+    # _spell_correct). The caller turns it OFF for slots whose keywords are short
+    # and collision-prone (duration, country, season) so an unrelated word is
+    # never "corrected" into one of them.
+    #
     # FIRST clean up informal shorthand ("wanna", "&", "w/o", ...) on the raw
     # sentence, so the tokenizer and every matcher below see plain English. We do
     # this here (not in the chatbot) so EVERY call to extract() benefits, no
@@ -201,6 +292,13 @@ def extract(text, keyword_map, allow_spellcheck=True, blocking_vocabulary=None):
         raw   = raw_tokens[i]
         lemma = lemma_tokens[i]
 
+        # Skip "may" when it is a modal verb (MD tag) rather than the month May.
+        # NLTK reliably tags modal "may" as MD in context ("I may want Europe"),
+        # while calendar "may" in travel-time phrases ("in May") gets NN/NNP.
+        if raw == "may" and pos_tags[i][1] == "MD":
+            i += 1
+            continue
+
         if raw in NEGATION_CONNECTORS and negated_recently:
             # "not africa or asia" means both values should be excluded.
             pending_negate   = True
@@ -218,12 +316,39 @@ def extract(text, keyword_map, allow_spellcheck=True, blocking_vocabulary=None):
             negate_ttl = 0
 
         if lemma in NEGATION_WORDS or raw in NEGATION_WORDS:
+            # Before treating this token as a negation trigger, check whether it
+            # STARTS a multi-word phrase in the vocabulary (e.g. "not too hot"
+            # -> mild, "no frills" -> Budget). These phrases must be matched
+            # BEFORE "not"/"no" is consumed as negation, otherwise only the
+            # single-token match fires and the phrase meaning is lost.
+            phrase_matched, phrase_consumed = _match_exact_at(raw_tokens, lemma_tokens, i, keyword_map)
+            if phrase_matched is not None and phrase_consumed > 1:
+                value = keyword_map[phrase_matched]
+                if pending_negate:
+                    _add_unique(exclude, value)
+                    pending_negate   = False
+                    negate_ttl       = 0
+                    negated_recently = True
+                else:
+                    _add_unique(include, value)
+                i += phrase_consumed
+                continue
+            # No multi-word phrase matched: treat token as a negation trigger.
             pending_negate = True
             negate_ttl     = 20
             i += 1
             continue
 
         matched, consumed = _match_exact_at(raw_tokens, lemma_tokens, i, keyword_map)
+
+        # SPELL CORRECTION (only if no exact phrase matched here and the caller
+        # allows it for this slot). We try to repair the single raw token, then
+        # its lemma, into a vocabulary keyword. Conservative guards inside
+        # _spell_correct keep this from firing on ordinary words.
+        if matched is None and allow_spellcheck:
+            corrected = _spell_correct(raw, vocabulary) or _spell_correct(lemma, vocabulary)
+            if corrected is not None:
+                matched, consumed = corrected, 1
 
         # If a pending negation reaches a known keyword that belongs to another
         # slot, consume the negation there instead of letting it leak forward to

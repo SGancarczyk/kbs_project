@@ -43,12 +43,20 @@ def climate_membership(temp, term):
 # ----- BUDGET: an ordered category -> graded match ----------------------------
 # SHAPE: a discrete TRIANGULAR membership sampled on the ordinal scale
 # Budget(0) < Mid-range(1) < Luxury(2). The requested level is the triangle's
-# apex (membership 1.0); each step away drops the membership (1.0 -> 0.4 -> 0.0),
-# exactly like a symmetric triangle evaluated at integer offsets. We use a
-# triangle (not a crisp equals) so a neighbouring price band still counts a bit.
+# apex (membership 1.0); each step away drops the membership (1.0 -> 0.5 -> 0.0),
+# exactly like a symmetric triangle (half-width 2) evaluated at integer offsets.
+# This MIRRORS the duration scale below so both ordinal criteria read the same
+# way once turned into certainty factors with CF = 2m-1:
+#   exact match (m=1.0) -> positive evidence,
+#   one band off (m=0.5) -> NEUTRAL (CF = 0), a near-miss that neither helps nor
+#                           hurts, matching the "still counts a bit" intent,
+#   two bands off (m=0.0) -> negative evidence (a genuine mismatch).
+# (Previously one-step-off was 0.4, which silently became *negative* evidence —
+# contradicting the comment that called it a partial match. 0.5 makes the maths
+# and the description agree.)
 _BUDGET_ORDER = {"Budget": 0, "Mid-range": 1, "Luxury": 2}
-# distance-in-steps -> membership: same level=1.0, one step off=0.4, two off=0.0
-_ORDINAL_MEMBERSHIP = {0: 1.0, 1: 0.4, 2: 0.0}
+# distance-in-steps -> membership: same level=1.0, one step off=0.5, two off=0.0
+_ORDINAL_MEMBERSHIP = {0: 1.0, 1: 0.5, 2: 0.0}
 def budget_membership(city_level, requested_level):
     # How well does a city's budget satisfy the level the user asked for? We use
     # .get and guard against unknown labels so bad/unknown input returns 0.0

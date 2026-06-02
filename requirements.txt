@@ -1,8 +1,18 @@
-# Python dependencies for the Travel Destination chatbot.
+# Python dependencies for the Travel Destination KBS chatbot.
 #
-# The CORE system (CLI via main.py, NLP, fuzzy logic, inference, tests) needs
-# NO external libraries - it runs on the Python standard library alone.
+# Install everything with:   pip install -r requirements.txt
 #
-# The ONLY external dependency is Streamlit, used solely by the optional GUI
-# (app.py). Install it with:  pip install -r requirements.txt
+# After installing, download the NLTK data the NLP layer needs (one-off):
+#   python -c "import nltk; [nltk.download(p) for p in \
+#     ('punkt','punkt_tab','averaged_perceptron_tagger',\
+#      'averaged_perceptron_tagger_eng','wordnet','omw-1.4')]"
+# (nlp.py also attempts this automatically on first import.)
+
+# Data loading (knowledge_base.py reads the CSV with pandas).
+pandas>=1.3
+
+# Natural-language layer (nlp.py): tokenization + lemmatization + POS tagging.
+nltk>=3.6
+
+# Optional GUI only (app.py). The command line (main.py) and tests do NOT need it.
 streamlit>=1.30

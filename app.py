@@ -57,6 +57,9 @@ def render_recommendations(payload):
         # Forward-chaining advisories become prominent warning banners.
         for advisory in payload.get("advisories", []):
             st.warning(advisory)
+        # Data summary ("I compared N destinations ...") as a quiet caption.
+        if payload.get("summary"):
+            st.caption(payload["summary"])
         # The header is shown as bold intro text above the cards.
         st.markdown("**" + payload["header"] + "**")
         for result in payload["results"]:
@@ -72,9 +75,10 @@ def render_recommendations(payload):
                                + "  ·  " + result["temp"]
                                + "  ·  " + result["budget"])
                 with score_col:
-                    # Confidence in [-1, 1]; show it plainly so it is honest even
-                    # when the match is weak/negative.
-                    st.metric("Confidence", f"{result['confidence']:.2f}")
+                    # Customer-facing: a friendly word for how good the fit is
+                    # ("Great match"), NOT the raw certainty factor. The numeric
+                    # reasoning stays inside the engine.
+                    st.metric("Fit", result["match"])
                 # The human-readable blurb about the city.
                 st.write(result["description"])
                 # What the city itself is strongest on (lifestyle scores >= 4).

@@ -47,10 +47,20 @@ def _lifestyle_pick_question():
     )
 
 
+_ALL_LIFESTYLE_PHRASES = {
+    "all", "everything", "all of them", "all of it", "all please",
+    "each", "each one", "every one", "select all", "yes all", "all dimensions",
+}
+
+
 def _parse_lifestyle_selection(raw):
     # Parse "1 3 5" or "1,3,5" into [(index, dim_name), ...].
+    # "all", "everything", "all of them" etc. select all dimensions.
     # Empty raw string returns [] which the caller treats as "all dimensions".
-    dims  = kb.LIFESTYLE_DIMENSIONS
+    dims = kb.LIFESTYLE_DIMENSIONS
+    t = raw.lower().strip()
+    if t in _ALL_LIFESTYLE_PHRASES:
+        return list(enumerate(dims))
     parts = raw.replace(",", " ").split()
     selected, seen = [], set()
     for p in parts:
@@ -113,6 +123,13 @@ def _parse_lifestyle_ratings(raw, selected_dims):
 
 # Words that mean "I have no preference for the thing you just asked" - they let
 # the user SKIP a slot instead of being forced to answer (un-menu-like).
+# Short affirmations used to accept a suggestion ("Want similar places?" -> "yes").
+_AFFIRM_WORDS = {"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "please",
+                 "go", "go ahead", "do it", "yes please", "sounds good", "why not",
+                 "please do", "definitely", "absolutely", "that works", "perfect", "yes pls"}
+# Short declines used to reject a suggestion.
+_DECLINE_WORDS = {"no", "nope", "nah", "not really", "no thanks", "not quite", "not exactly"}
+
 SKIP_WORDS = {"any", "anywhere", "whatever", "skip", "none", "no", "nope", "idk", "anything"}
 SKIP_PHRASES = {"doesn't matter", "does not matter", "dont care", "don't care", "do not care", "no preference", "not sure",
                 # Apostrophe-free / texting variants so casual phrasing still
@@ -265,6 +282,10 @@ class TravelChatbot:
         # Keep a reference to the Knowledge Base (the 560 destinations) and start
         # a fresh, empty conversation.
         self.destinations = destinations
+        # Lookup of city-name -> destination, used by the "tell me about <city>"
+        # and "more like <city>" intents so the bot can answer data questions
+        # about a specific place. Lower-cased keys for case-insensitive matching.
+        self._city_index = {d["city"].lower(): d for d in destinations}
         self.reset()
 
     def reset(self):
@@ -287,6 +308,11 @@ class TravelChatbot:
             # the season slot so the inference engine can use seasonal temperature
             # data instead of the yearly average when scoring climate.
             "travel_months": [],
+            # PER-USER IMPORTANCE: a multiplier per criterion (climate/budget/
+            # duration/lifestyle). Filled when the user signals a priority, e.g.
+            # "budget is the most important" -> {"budget": 1.3}, or "I don't really
+            # care about the weather" -> {"climate": 0.6}. Empty = everyone equal.
+            "importance": {},
         }
         # Conversation bookkeeping.
         self.resolved = set()        # slots the user has answered OR skipped
@@ -298,6 +324,11 @@ class TravelChatbot:
         # the user never has to reject the same place twice. Cleared on restart
         # because reset() rebuilds it as an empty set.
         self.rejected_cities = set()
+        # When we have just shown a city's PROFILE ("tell me about Kyoto"), we
+        # remember that city here so the NEXT message can be read as a follow-up:
+        # "yes" -> find similar places, or a tweak like "but warmer and cheaper"
+        # -> find similar places WITH those changes. Cleared once acted on.
+        self._suggested_city = None
         # Tracks which slots the user explicitly skipped (vs. filled).
         self._skipped = {}
         # Counter used to rotate the friendly openers in _acknowledge() so the
@@ -374,6 +405,8 @@ class TravelChatbot:
                 "'a cheap warm week in Asia, I love food and culture'. "
                 "I understand full sentences, fix small typos, and handle negation "
                 "like 'not Africa' or 'avoid nightlife'.\n"
+                "You can also ask about a place — 'tell me about Kyoto' — or say "
+                "'more like Lisbon' to find similar destinations.\n"
                 "Commands: 'go' or 'skip all' (get picks now), 'why' (see reasoning), "
                 "'skip' (skip one question), 'restart', 'exit'.")
 
@@ -405,6 +438,14 @@ class TravelChatbot:
         # warm reply rather than a confused "I didn't understand that".
         if self._detect_small_talk(t) is not None:
             return "small_talk"
+        # CITY DATA QUESTIONS: "more like Tokyo" / "tell me about Kyoto". Only fire
+        # when the message BOTH names a known city AND carries an asking cue, so a
+        # plain preference like "I want to visit Tokyo" is still parsed normally.
+        if self._find_city_in_text(text) is not None:
+            if any(cue in t for cue in self._MORE_LIKE_CUES):
+                return "more_like"
+            if any(cue in t for cue in self._DESCRIBE_CUES):
+                return "describe_city"
         # REJECTION: only possible once we have actually shown some picks. We
         # require a rejection cue ("not", "remove", ...) AND that it points at a
         # city/position currently on screen, so an ordinary preference such as
@@ -459,6 +500,27 @@ class TravelChatbot:
                 to_reject.append(city)
         return to_reject
 
+    def _find_city_in_text(self, text):
+        # Return the destination whose city name appears in the message, or None.
+        # We try the LONGEST city names first so "Cape Town" is matched as a whole
+        # before any shorter city, and we require word boundaries so "Bath" does
+        # not match inside "bathing". Used by the describe / more-like intents.
+        import re as _re
+        t = text.lower()
+        for name in sorted(self._city_index, key=len, reverse=True):
+            if _re.search(r"\b" + _re.escape(name) + r"\b", t):
+                return self._city_index[name]
+        return None
+
+    # Phrases that signal the user is ASKING ABOUT a specific city (vs. stating it
+    # as a preference). Paired with a known city name, they trigger a data profile.
+    _DESCRIBE_CUES = ("tell me about", "what about", "what can you tell", "describe",
+                      "info on", "information on", "anything on", "how is", "how's",
+                      "hows ", "what is", "whats ", "what's ", "tell me more about")
+    # Phrases asking for destinations similar to a named city.
+    _MORE_LIKE_CUES = ("more like", "similar to", "something like", "sort of like",
+                       "places like", "somewhere like", "anything like")
+
     def _is_skip(self, text):
         # True if the whole message means "no preference here".
         t = text.lower().strip()
@@ -491,10 +553,11 @@ class TravelChatbot:
     def _blocking_vocabulary_for(self, keyword_map):
         # All vocabulary keys except the current slot. Used by nlp.extract so a
         # negation aimed at another category does not leak into this category.
-        # SEASON_SYNONYMS is included so e.g. "not summer" never bleeds into
-        # a continent or lifestyle extraction.
+        # COUNTRY_SYNONYMS is now included so "not expensive Japan" does not
+        # exclude Japan when we are extracting budget, and vice versa.
         all_maps = [
             kb.CONTINENT_SYNONYMS,
+            kb.COUNTRY_SYNONYMS,
             kb.CLIMATE_SYNONYMS,
             kb.BUDGET_SYNONYMS,
             kb.DURATION_SYNONYMS,
@@ -574,6 +637,109 @@ class TravelChatbot:
                     months.append(m)
         return months
 
+    # Phrases that say a criterion matters MORE / LESS than the rest. Paired with
+    # the nearest criterion word, they set a per-user importance multiplier. We
+    # keep these to clear "this above the others" wordings (not generic "very
+    # important", which overlaps with the lifestyle 1-5 rating phrasing).
+    _EMPHASIS_CUES = ("most important", "matters most", "matter most", "care most",
+                      "care the most", "top priority", "biggest priority",
+                      "main priority", "number one", "is a must", "are a must",
+                      "is a priority", "priority for me", "really matters",
+                      "what matters most", "what i care about most")
+    _DEEMPHASIS_CUES = ("don't care", "dont care", "do not care", "don't really care",
+                        "dont really care", "not fussed", "not bothered", "care less",
+                        "least important", "not that important", "not important",
+                        "doesn't matter", "does not matter", "not a priority")
+    # Plain anchor words that point at a criterion, so an emphasis phrase attaches
+    # to the right slot even when the user names it plainly ("budget matters most").
+    _CRIT_ANCHORS = {"budget": "budget", "price": "budget", "cost": "budget",
+                     "money": "budget", "climate": "climate", "weather": "climate",
+                     "temperature": "climate", "duration": "duration",
+                     "length": "duration", "interest": "lifestyle",
+                     "interests": "lifestyle", "activities": "lifestyle",
+                     "activity": "lifestyle", "lifestyle": "lifestyle"}
+    _CRIT_LABEL = {"climate": "the climate", "budget": "budget",
+                   "duration": "the trip length", "lifestyle": "your interests"}
+
+    def _detect_importance(self, text):
+        # Work out whether the user flagged a criterion as more/less important and
+        # return {criterion: multiplier}. We find ALL occurrences of each cue with
+        # finditer (so compound sentences like "budget matters most and climate
+        # matters most" produce two separate findings), then attach each occurrence
+        # to the NEAREST criterion word by character distance.
+        import re as _re
+        t = text.lower()
+        vocabs = (("climate", kb.CLIMATE_SYNONYMS), ("budget", kb.BUDGET_SYNONYMS),
+                  ("duration", kb.DURATION_SYNONYMS), ("lifestyle", kb.LIFESTYLE_SYNONYMS))
+        positions = []                       # (char_index, criterion)
+        for tok in _re.finditer(r"[a-z']+", t):
+            w = tok.group()
+            if w in self._CRIT_ANCHORS:
+                positions.append((tok.start(), self._CRIT_ANCHORS[w]))
+                continue
+            for crit, vocab in vocabs:
+                if w in vocab:
+                    positions.append((tok.start(), crit))
+                    break
+        if not positions:
+            return {}
+
+        def attach(cue_start, cue_end):
+            # Two patterns occur: "budget is not important" (criterion BEFORE the
+            # cue as the sentence subject) and "don't care about the weather"
+            # (criterion AFTER the cue as the object of a preposition like "about").
+            #
+            # Strategy:
+            #  1. If the text right after the cue starts with "about/for/on",
+            #     the criterion is the object — look after the cue.
+            #  2. Otherwise prefer the closest criterion BEFORE the cue (it is the
+            #     grammatical subject being described). This correctly handles
+            #     compound sentences: "budget is not important but climate matters
+            #     most" — each cue anchors to the nearest preceding criterion.
+            #  3. Fall back to the closest criterion after, then to overall nearest.
+            after_snippet = t[cue_end:cue_end + 50].lstrip()
+            prepositions = ("about ", "for ", "on ", "regarding ")
+            if any(after_snippet.startswith(p) for p in prepositions):
+                after = [pc for pc in positions if pc[0] >= cue_end]
+                if after:
+                    return min(after, key=lambda pc: pc[0] - cue_end)[1]
+            before = [pc for pc in positions if pc[0] < cue_start]
+            if before:
+                closest = max(before, key=lambda pc: pc[0])
+                if cue_start - closest[0] <= 30:
+                    return closest[1]
+            after = [pc for pc in positions if pc[0] >= cue_end]
+            if after:
+                na = min(after, key=lambda pc: pc[0] - cue_end)
+                if na[0] - cue_end <= 50:
+                    return na[1]
+            return min(positions, key=lambda pc: abs(pc[0] - cue_start))[1]
+
+        found = {}
+        for cue in self._EMPHASIS_CUES:
+            for m in _re.finditer(_re.escape(cue), t):
+                crit = attach(m.start(), m.end())
+                if crit not in found:           # first emphasis wins per criterion
+                    found[crit] = 1.3
+        for cue in self._DEEMPHASIS_CUES:
+            for m in _re.finditer(_re.escape(cue), t):
+                crit = attach(m.start(), m.end())
+                found[crit] = 0.6               # de-emphasis overrides emphasis
+        return found
+
+    def _importance_note(self, imp_changed):
+        # Turn newly-set importance multipliers into a short confirmation sentence.
+        if not imp_changed:
+            return ""
+        ups = [self._CRIT_LABEL[c] for c, f in imp_changed.items() if f > 1]
+        downs = [self._CRIT_LABEL[c] for c, f in imp_changed.items() if f < 1]
+        notes = []
+        if ups:
+            notes.append("I'll weight " + _join_natural(ups) + " more heavily")
+        if downs:
+            notes.append("I'll go easier on " + _join_natural(downs))
+        return ("; ".join(notes) + ".") if notes else ""
+
     def _update_slots(self, text):
         # Run the NLP extractor once per vocabulary and merge whatever it finds
         # into the query. Exclusions are kept too, so "not expensive" and
@@ -588,6 +754,8 @@ class TravelChatbot:
             # NEW: tracks which travel months were newly added this turn so
             # _acknowledge() can confirm them back to the user.
             "travel_months": [],
+            # Per-criterion importance multipliers set this turn (e.g. budget:1.3).
+            "importance": {},
         }
 
         cont = nlp.extract(text, kb.CONTINENT_SYNONYMS, allow_spellcheck=self._allow_spellcheck_for("continent"), blocking_vocabulary=self._blocking_vocabulary_for(kb.CONTINENT_SYNONYMS))
@@ -600,7 +768,8 @@ class TravelChatbot:
                 self.query["regions_exclude"].append(v)
                 changed["regions_exclude"].append(v)
 
-        ctry = nlp.extract(text, kb.COUNTRY_SYNONYMS, allow_spellcheck=False, blocking_vocabulary=None)
+        ctry = nlp.extract(text, kb.COUNTRY_SYNONYMS, allow_spellcheck=False,
+                           blocking_vocabulary=self._blocking_vocabulary_for(kb.COUNTRY_SYNONYMS))
         for v in ctry["include"]:
             if v not in self.query["countries_include"]:
                 self.query["countries_include"].append(v)
@@ -609,6 +778,22 @@ class TravelChatbot:
             if v not in self.query["countries_exclude"]:
                 self.query["countries_exclude"].append(v)
                 changed["countries_exclude"].append(v)
+
+        # Country+region deduplication: "Japan in Asia" should mean Japan only
+        # (Asia is just describing Japan's region, not adding a separate filter).
+        # We only deduplicate when the user did NOT use an explicit "or" (which
+        # signals they intentionally want a union: "Japan or Europe").
+        if changed["countries_include"] and changed["regions_include"]:
+            if " or " not in text.lower():
+                country_containing_regions = {
+                    kb.country_to_region(c) for c in changed["countries_include"]
+                    if kb.country_to_region(c)
+                }
+                for r in list(changed["regions_include"]):
+                    if r in country_containing_regions:
+                        changed["regions_include"].remove(r)
+                        if r in self.query["regions_include"]:
+                            self.query["regions_include"].remove(r)
 
         clim = nlp.extract(text, kb.CLIMATE_SYNONYMS, allow_spellcheck=self._allow_spellcheck_for("climate"), blocking_vocabulary=self._blocking_vocabulary_for(kb.CLIMATE_SYNONYMS))
         for v in clim["include"]:
@@ -646,7 +831,34 @@ class TravelChatbot:
                 self.query["duration_exclude"].append(v)
                 changed["duration_exclude"].append(v)
 
-        # LIFESTYLE — two-phase notebook-style flow:
+        # LIFESTYLE from FREE TEXT — extracted on EVERY message, so the bot is not
+        # a numbered menu only. "I love food and culture" or "avoid nightlife"
+        # work at any point in the conversation:
+        #   - EXCLUDES ("avoid nightlife", "without beaches") always reach the
+        #     query so the inference engine can penalise them.
+        #   - INCLUDES ("I love food and culture") populate the interest vector
+        #     with a strong default weight of 4 ("very important"), since the user
+        #     volunteered them. The numbered menu below still exists as a support
+        #     mechanism for users who would rather pick from a list.
+        # allow_spellcheck is off here because lifestyle keywords are numerous and
+        # collision-prone; an exact/lemma match is safer.
+        life_any = nlp.extract(text, kb.LIFESTYLE_SYNONYMS, allow_spellcheck=False,
+                               blocking_vocabulary=self._blocking_vocabulary_for(kb.LIFESTYLE_SYNONYMS))
+        for v in life_any["exclude"]:
+            if v not in self.query["lifestyle_exclude"]:
+                self.query["lifestyle_exclude"].append(v)
+                changed["lifestyle_exclude"].append(v)
+        # Skip free-text INCLUDES while the user is literally answering the rating
+        # question (lifestyle_rate): there the digits/words are ratings, not new
+        # interests, and _parse_lifestyle_ratings already handles them.
+        if self.pending_slot != "lifestyle_rate":
+            for v in life_any["include"]:
+                if v not in self.query["lifestyle"] or self.query["lifestyle"].get(v) == -1:
+                    self.query["lifestyle"][v] = 4   # a volunteered interest = strong want
+                    if v not in changed["lifestyle"]:
+                        changed["lifestyle"].append(v)
+
+        # LIFESTYLE INTERESTS — two-phase notebook-style menu (a SUPPORT path):
         #
         # Phase 1 (lifestyle_pick): user selects dimensions by number from the
         # shown list (e.g. "1 3 5"). Selected dims are stored as int placeholder
@@ -692,6 +904,12 @@ class TravelChatbot:
             if m not in self.query["travel_months"]:
                 self.query["travel_months"].append(m)
                 changed["travel_months"].append(m)
+
+        # PER-USER IMPORTANCE: "budget matters most" / "I don't care about climate".
+        for crit, factor in self._detect_importance(text).items():
+            if self.query["importance"].get(crit) != factor:
+                self.query["importance"][crit] = factor
+                changed["importance"][crit] = factor
 
         return changed
 
@@ -785,14 +1003,18 @@ class TravelChatbot:
             clauses.append("not " + _join_natural([_DURATION_PHRASES.get(d, d.lower()) for d in changed["duration_exclude"]]))
         if changed["lifestyle_exclude"]:
             clauses.append("steering clear of " + _join_natural(changed["lifestyle_exclude"]))
-        # Nothing recognised -> signal the caller to ask for clarification.
-        if not clauses:
+        # A stated priority ("budget matters most") is also worth confirming, even
+        # if it was the ONLY thing in the message.
+        imp_note = self._importance_note(changed.get("importance") or {})
+        # Nothing recognised at all -> signal the caller to ask for clarification.
+        if not clauses and not imp_note:
             return None
         # Opener + the natural list of clauses, e.g.
         # "Got it. mid-range, warm climate, and you enjoy culture and food."
-        # (Previously: "Noted — mid-range, warm climate, and you enjoy culture and food."
-        #  and "Perfect! Europe, on a budget, and you enjoy culture and food.")
-        ack_text = self._next_opener() + " " + _join_natural(clauses) + "."
+        opener = self._next_opener()
+        ack_text = (opener + " " + _join_natural(clauses) + ".") if clauses else opener
+        if imp_note:
+            ack_text += " " + imp_note
         # When lifestyle ratings were just confirmed, append a natural summary
         # of what will be prioritised — mirrors the design spec example.
         if any(self.query["lifestyle"].get(d, -1) > 0
@@ -840,6 +1062,11 @@ class TravelChatbot:
             self.last_results = None
             return ("I need at least one preference before I can make a meaningful recommendation. "
                     "Tell me a region, budget, climate, trip length, interest, or something to avoid.")
+        # SAFETY: replace any -1 placeholders (dimensions picked but never rated)
+        # with the moderate default BEFORE inference runs, so a negative
+        # placeholder can never leak into the lifestyle cosine vector when the
+        # user jumps to results via 'go' / 'skip all' mid-rating.
+        self._sanitize_lifestyle_weights()
         # Ask the engine for a few EXTRA picks beyond the 5 we want to show, so
         # that after we drop any rejected cities we can still backfill up to 5
         # good options instead of returning a short list.
@@ -854,9 +1081,13 @@ class TravelChatbot:
         ][:wanted]
         # Remember the (filtered) view we actually showed, so 'why' explains
         # these exact picks and so a follow-up "not <city>" matches the on-screen
-        # list. We copy `out` but swap in the filtered results.
+        # list. We copy `out` but swap in the filtered results and snapshot the
+        # query so _explain_last() always explains the SAME query that produced
+        # these results, even if the user keeps refining preferences afterwards.
         self.last_results = dict(out)
         self.last_results["results"] = results
+        self.last_results["query"] = {k: (dict(v) if isinstance(v, dict) else list(v))
+                                      for k, v in self.query.items()}
         # EMPTY / NO-MATCH state stays a PLAIN STRING (not a dict). Callers and
         # the GUI treat any string as ordinary chat text, so error/empty replies
         # keep rendering exactly as before. Only a successful list of picks is
@@ -873,17 +1104,18 @@ class TravelChatbot:
         # GUI can lay each pick out as its own card and the CLI can still render
         # it as text (via render_response_text()). Each card carries the already
         # computed numbers so neither front end has to recompute anything.
+        # Snapshot the query ONCE so every card explains the pick against what the
+        # user asked for at THIS moment (used by the plain-English reasons below).
+        query_snapshot = {k: (dict(v) if isinstance(v, dict) else list(v))
+                          for k, v in self.query.items()}
         cards = []
         rank = 1
         for conf, dest, score in results:
-            # Rebuild the per-criterion evidence breakdown (same content as
-            # inference.explain) but WITHOUT the leading "confidence .. |" and the
-            # "strong on .." tail, because we expose those as separate fields.
-            parts = []
-            for name, (membership, cf) in score["details"].items():
-                sign = "+" if cf >= 0 else ""
-                parts.append(name + " " + str(round(membership, 2)) + " (cf " + sign + str(round(cf, 2)) + ")")
-            explanation = ", ".join(parts) if parts else "no preferences given yet"
+            # CUSTOMER-FACING reasoning only: plain-English bullets (no certainty
+            # factors, no membership numbers). The signed CF maths still drives the
+            # ranking internally — the user just never has to read it. The overall
+            # fit is shown as a friendly word ("Great match"), not a raw score.
+            reasons = inf.explain_human(dest, score, query_snapshot)
             # Lifestyle dimensions the CITY itself scores highly on (>=4), so the
             # card can show "Strong on: nature, cuisine" regardless of the query.
             strong_on = [dim for dim in kb.LIFESTYLE_DIMENSIONS if dest.get(dim, 0) >= 4]
@@ -894,21 +1126,37 @@ class TravelChatbot:
                 "region": dest["region"],
                 "temp": str(dest["avg_temp_yearly"]) + "C",
                 "budget": dest["budget_level"],
-                "confidence": round(conf, 2),
-                "explanation": explanation,        # technical trace (CLI)
+                "match": inf.match_label(conf),    # friendly word for the customer
+                "reasons": reasons,                # plain-English "why" bullets
                 "description": dest["short_description"],
                 "strong_on": strong_on,
-                # Raw inputs so the GUI can build a HUMAN explanation on demand
-                # via inference.explain_human(dest, score, query). These are the
-                # same objects already held in self.last_results, so it is just a
-                # reference, not a copy.
+                # Raw inputs kept so the GUI can also build the explanation on
+                # demand; these are references, not copies.
                 "dest": dest,
                 "score": score,
             })
             rank += 1
+        # DATA SUMMARY line: tell the user how big a pool we actually searched, and
+        # where, so the recommendation feels grounded in the 560-city dataset
+        # rather than appearing from nowhere. pool_size comes straight from the
+        # inference engine (the count of cities left after the crisp filters).
+        scope_parts = []
+        if self.query["regions_include"]:
+            scope_parts.extend([_pretty_region(r) for r in self.query["regions_include"]])
+        if self.query["countries_include"]:
+            scope_parts.extend(self.query["countries_include"])
+        scope = (" in " + _join_natural(scope_parts)) if scope_parts else ""
+        if out.get("broadened"):
+            summary = ("Nothing matched that exact region, so I widened the search to "
+                       + str(out["pool_size"]) + " destinations. Closest matches:")
+        else:
+            summary = ("I compared " + str(out["pool_size"]) + " destination"
+                       + ("s" if out["pool_size"] != 1 else "") + scope
+                       + " and ranked the best fits:")
         return {
             "type": "recommendations",
             "advisories": list(out["advisories"]),
+            "summary": summary,
             "header": "Here are a few destinations that fit what you're looking for:",
             "results": cards,
             "footer": "Type 'why' for the reasoning, 'restart' to search again, or 'exit' to leave.",
@@ -924,11 +1172,165 @@ class TravelChatbot:
         # (RESPONSE TYPE 12). If we have not recommended yet, say so.
         if not self.last_results or not self.last_results["results"]:
             return "I haven't made any recommendations yet. Tell me what you're looking for first."
-        lines = ["Here's my reasoning (each criterion becomes a certainty factor: CF>0 supports the city, CF<0 counts against it; all are combined MYCIN-style into the confidence):"]
+        # Use the query that was ACTIVE when the recommendation was generated, not
+        # the live query that may have been refined since. This keeps the "why"
+        # explanation consistent with what the user actually saw on screen.
+        stored_query = self.last_results.get("query") or self.query
+        lines = ["Here's why I picked these:"]
         for conf, dest, score in self.last_results["results"]:
-            comps = ", ".join(name + " m=" + str(round(m, 2)) + "/cf=" + ("+" if cf >= 0 else "") + str(round(cf, 2)) for name, (m, cf) in score["details"].items()) or "no criteria given"
-            lines.append(dest["city"] + ": " + comps + " -> confidence " + str(round(conf, 2)))
+            lines.append("")
+            lines.append(dest["city"] + ", " + dest["country"]
+                         + " — " + inf.match_label(conf))
+            for reason in inf.explain_human(dest, score, stored_query):
+                lines.append("  - " + reason)
         return "\n".join(lines)
+
+    def _describe_city(self, dest):
+        # DATA PROFILE of one city, built entirely from Knowledge Base columns we
+        # already store (monthly temperatures, latitude, lifestyle scores, budget,
+        # ideal durations). A new, data-grounded response type.
+        lines = []
+        lines.append(dest["city"] + ", " + dest["country"]
+                     + " (" + _pretty_region(dest["region"]) + ")")
+        lines.append(dest["short_description"])
+        # Climate + yearly average.
+        lines.append("Climate: " + dest["climate"] + ", about "
+                     + str(dest["avg_temp_yearly"]) + "°C on average across the year.")
+        # Best time to visit for warm weather (from the monthly averages).
+        comfy = kb.comfortable_months(dest["avg_temp_monthly"])
+        if comfy:
+            lines.append("Best time for warm, pleasant weather: "
+                         + kb.format_month_ranges(comfy) + ".")
+        else:
+            wm = kb.warmest_month(dest["avg_temp_monthly"])
+            if wm:
+                lines.append("It stays cool most of the year; the mildest spell is "
+                             "around " + kb._MONTH_ABBR[wm[0]]
+                             + " (~" + str(round(wm[1])) + "°C).")
+        # Typical day/night feel in the warmest month (uses max/min we store).
+        wm = kb.warmest_month(dest["avg_temp_monthly"])
+        if wm:
+            hot = dest["avg_temp_monthly"][str(wm[0])]
+            lines.append("In " + kb._MONTH_ABBR[wm[0]] + " expect roughly "
+                         + str(round(hot["max"])) + "°C days and "
+                         + str(round(hot["min"])) + "°C nights.")
+        # Southern-hemisphere seasons are flipped — a genuinely useful note.
+        if kb.hemisphere(dest.get("latitude")) == "southern":
+            lines.append("It's in the southern hemisphere, so its summer falls "
+                         "around December–February.")
+        # What the city itself is strongest on (lifestyle scores >= 4).
+        strong = [dim for dim in kb.LIFESTYLE_DIMENSIONS if dest.get(dim, 0) >= 4]
+        if strong:
+            lines.append("Great for: " + _join_natural(strong) + ".")
+        lines.append("Budget level: " + dest["budget_level"]
+                     + ". Ideal for " + _join_natural([_DURATION_PHRASES.get(d, d.lower())
+                                                       for d in dest["ideal_durations"]]) + ".")
+        # Remember this city so the next message can act on it (yes / a tweak).
+        self._suggested_city = dest
+        lines.append("Is this the kind of place you're after? I can find similar "
+                     "destinations — just say \"yes\", or tell me what to change "
+                     "(for example \"but warmer\", \"cheaper\", or \"more beaches\").")
+        return "\n".join(lines)
+
+    def _message_mentions_preference(self, text):
+        # Read-only probe: does this message contain ANY recognisable preference
+        # (climate/budget/duration/lifestyle/region/country)? Used to tell a tweak
+        # like "but warmer and cheaper" apart from an unrelated reply.
+        for vocab in (kb.CLIMATE_SYNONYMS, kb.BUDGET_SYNONYMS, kb.DURATION_SYNONYMS,
+                      kb.LIFESTYLE_SYNONYMS, kb.CONTINENT_SYNONYMS, kb.COUNTRY_SYNONYMS):
+            r = nlp.extract(text, vocab, allow_spellcheck=False)
+            if r["include"] or r["exclude"]:
+                return True
+        return False
+
+    def _apply_more_like_tweaks(self, text):
+        # Apply user changes ON TOP of a cloned city template and return a list of
+        # short human descriptions of what changed. Climate/budget/duration are
+        # OVERRIDDEN (a single intended value); lifestyle interests are boosted to
+        # 5 ("more X") or excluded ("less X"); regions/countries are added as a
+        # filter. Mirrors the normal extractors but with override semantics.
+        changes = []
+        clim = nlp.extract(text, kb.CLIMATE_SYNONYMS, allow_spellcheck=True,
+                           blocking_vocabulary=self._blocking_vocabulary_for(kb.CLIMATE_SYNONYMS))
+        if clim["include"]:
+            self.query["climate"] = list(dict.fromkeys(clim["include"]))
+            changes.append(_join_natural(clim["include"]) + " climate")
+        for v in clim["exclude"]:
+            if v not in self.query["climate_exclude"]:
+                self.query["climate_exclude"].append(v)
+            changes.append("not " + v)
+        bud = nlp.extract(text, kb.BUDGET_SYNONYMS, allow_spellcheck=True,
+                          blocking_vocabulary=self._blocking_vocabulary_for(kb.BUDGET_SYNONYMS))
+        if bud["include"]:
+            self.query["budget"] = list(dict.fromkeys(bud["include"]))
+            changes.append(_join_natural([_BUDGET_PHRASES.get(b, b.lower()) for b in bud["include"]]))
+        for v in bud["exclude"]:
+            if v not in self.query["budget_exclude"]:
+                self.query["budget_exclude"].append(v)
+            changes.append("nothing " + _BUDGET_PHRASES.get(v, v.lower()))
+        dur = nlp.extract(text, kb.DURATION_SYNONYMS, allow_spellcheck=False,
+                          blocking_vocabulary=self._blocking_vocabulary_for(kb.DURATION_SYNONYMS))
+        if dur["include"]:
+            self.query["duration"] = list(dict.fromkeys(dur["include"]))
+            changes.append(_join_natural([_DURATION_PHRASES.get(d, d.lower()) for d in dur["include"]]))
+        life = nlp.extract(text, kb.LIFESTYLE_SYNONYMS, allow_spellcheck=False,
+                           blocking_vocabulary=self._blocking_vocabulary_for(kb.LIFESTYLE_SYNONYMS))
+        for v in life["include"]:
+            self.query["lifestyle"][v] = 5            # "more X" = make it a top priority
+            changes.append("more " + v)
+        for v in life["exclude"]:
+            if v not in self.query["lifestyle_exclude"]:
+                self.query["lifestyle_exclude"].append(v)
+            self.query["lifestyle"].pop(v, None)
+            changes.append("less " + v)
+        cont = nlp.extract(text, kb.CONTINENT_SYNONYMS, allow_spellcheck=True,
+                           blocking_vocabulary=self._blocking_vocabulary_for(kb.CONTINENT_SYNONYMS))
+        for v in cont["include"]:
+            if v not in self.query["regions_include"]:
+                self.query["regions_include"].append(v)
+                changes.append("in " + _pretty_region(v))
+        ctry = nlp.extract(text, kb.COUNTRY_SYNONYMS, allow_spellcheck=False)
+        for v in ctry["include"]:
+            if v not in self.query["countries_include"]:
+                self.query["countries_include"].append(v)
+                changes.append("in " + v)
+        return changes
+
+    def _more_like(self, dest, tweak_text=""):
+        # CLONE a city's "vibe" into the preferences and recommend lookalikes.
+        # We copy the city's climate, budget, and its strong lifestyle dimensions
+        # (scores >= 4), clearing location and quality pins so the search is
+        # worldwide, then optionally apply the user's tweaks ("but warmer and
+        # cheaper"). The seed city itself is dropped so it is not recommended back.
+        # Duration and travel_months are PRESERVED: the user explicitly set those
+        # constraints and "more like X" should not silently drop them.
+        for key in ("regions_include", "regions_exclude", "countries_include",
+                    "countries_exclude", "climate_exclude", "budget_exclude",
+                    "lifestyle_exclude"):
+            self.query[key] = []
+        self.query["climate"] = [dest["climate"]]
+        self.query["budget"] = [dest["budget_level"]]
+        self.query["lifestyle"] = {dim: dest[dim] for dim in kb.LIFESTYLE_DIMENSIONS
+                                   if dest.get(dim, 0) >= 4}
+        # Strip the seed city's own name out of the tweak text first, so "more
+        # like Athens" does not get re-read as "pin the search to Greece" (Athens
+        # is a known city keyword). Only the user's genuine changes remain.
+        import re as _re
+        clean = _re.sub(r"\b" + _re.escape(dest["city"].lower()) + r"\b", " ",
+                        (tweak_text or "").lower())
+        changes = self._apply_more_like_tweaks(clean) if clean.strip() else []
+        self.rejected_cities.add(dest["city"])
+        strong = [d for d in kb.LIFESTYLE_DIMENSIONS if dest.get(d, 0) >= 4]
+        template = (dest["climate"] + ", " + dest["budget_level"].lower()
+                    + ", strong on " + _join_natural(strong))
+        if changes:
+            lead = ("Sure — starting from " + dest["city"] + " (" + template
+                    + ") with your changes (" + _join_natural(changes)
+                    + "), here are some options:")
+        else:
+            lead = ("Sure — using " + dest["city"] + " as a template (" + template
+                    + "), here are places with a similar vibe:")
+        return self._lead(lead, self._format_recommendation())
 
     def _lead(self, message, payload):
         # Attach a short conversational lead-in (e.g. "No problem.",
@@ -951,6 +1353,29 @@ class TravelChatbot:
         if not text or not text.strip():
             return ("Tell me a bit about the trip you're looking for. The more "
                     "details you share, the better the recommendations will be.")
+        # FOLLOW-UP TO A CITY PROFILE: if we just described a city and asked "want
+        # similar places?", read this message as the answer. "yes" -> lookalikes;
+        # a tweak ("but warmer and cheaper") -> lookalikes WITH those changes; "no"
+        # -> step back. Anything else (a hard command, a new city) clears the flag
+        # and falls through to normal handling.
+        if self._suggested_city is not None:
+            seed = self._suggested_city
+            t = text.lower().strip()
+            if t in _DECLINE_WORDS or t.startswith("no "):
+                self._suggested_city = None
+                return ("No problem. Tell me what you'd prefer and I'll suggest "
+                        "something else.")
+            if (self._detect_intent(text) in {"exit", "restart", "help", "why",
+                                              "describe_city", "more_like"}
+                    or self._find_city_in_text(text) is not None):
+                self._suggested_city = None          # user moved on / named a new city
+            elif (t in _AFFIRM_WORDS or any(t.startswith(a) for a in _AFFIRM_WORDS)
+                  or self._message_mentions_preference(text)):
+                self._suggested_city = None
+                has_pref = self._message_mentions_preference(text)
+                return self._more_like(seed, text if has_pref else "")
+            else:
+                self._suggested_city = None          # unrecognised — fall through
         intent = self._detect_intent(text)
         if intent == "exit":
             self.finished = True
@@ -962,23 +1387,44 @@ class TravelChatbot:
             return "Sure, let's start over.\n" + self._next_question()      # RESPONSE TYPE 14
         if intent == "why":
             return self._explain_last()
+        if intent == "describe_city":
+            city = self._find_city_in_text(text)
+            if city is not None:
+                return self._describe_city(city)
+        if intent == "more_like":
+            city = self._find_city_in_text(text)
+            if city is not None:
+                return self._more_like(city, text)
         if intent == "recommend":
-            # If lifestyle hasn't been asked yet, ask it first — without it the
-            # cosine similarity has nothing to score on and results are unweighted.
-            # Only block if NEITHER lifestyle slot has been touched at all.
-            lifestyle_untouched = (
-                not self.query["lifestyle"] and
-                not self.query["lifestyle_exclude"] and
-                "lifestyle_pick" not in self.resolved and
-                not self._skipped.get("lifestyle_pick", False)
-            )
-            if lifestyle_untouched:
-                self.pending_slot = "lifestyle_pick"
-                return ("Before I show results, one quick question — it helps me rank destinations.\n"
-                        + self._slots()[self._slot_index("lifestyle_pick")][1])
+            # EMPTY-QUERY GUARD FIRST: if the user has given no meaningful
+            # preference at all, do not ask the lifestyle question (that leads
+            # nowhere either) — fall straight through to _format_recommendation(),
+            # which returns the "tell me at least one preference" prompt. This
+            # keeps the chatbot and inference behaviour consistent.
+            if self._has_meaningful_preferences():
+                # There IS something to rank on. If lifestyle has never been
+                # touched we ask it once — without it the cosine similarity has
+                # nothing to score on and results are unweighted.
+                lifestyle_untouched = (
+                    not self.query["lifestyle"] and
+                    not self.query["lifestyle_exclude"] and
+                    "lifestyle_pick" not in self.resolved and
+                    not self._skipped.get("lifestyle_pick", False)
+                )
+                if lifestyle_untouched:
+                    self.pending_slot = "lifestyle_pick"
+                    return ("Before I show results, one quick question — it helps me rank destinations.\n"
+                            + self._slots()[self._slot_index("lifestyle_pick")][1])
             return self._format_recommendation()
         if intent == "greet":
-            return "Hello! " + (self._next_question() or "Tell me about the kind of trip you have in mind and I'll suggest some destinations.")
+            changed = self._update_slots(text)
+            if self.pending_slot is not None and self._slot_filled(self.pending_slot):
+                self.resolved.add(self.pending_slot)
+            ack = self._acknowledge(changed)
+            nxt = self._next_question() or "Tell me about the kind of trip you have in mind and I'll suggest some destinations."
+            if ack:
+                return "Hello! " + ack + "\n" + nxt
+            return "Hello! " + nxt
         # SMALL TALK: pick a random reply from the matching set, then append the
         # next pending question so the conversation keeps moving. An empty string
         # reply means the phrase was ambiguous (e.g. "cool") so we fall through
@@ -988,9 +1434,16 @@ class TravelChatbot:
             if replies:
                 chosen = random.choice(replies)
                 if chosen:
+                    # Also extract any preferences embedded in the same message
+                    # (e.g. "hello i would love to go to Japan or Europe").
+                    changed = self._update_slots(text)
+                    if self.pending_slot is not None and self._slot_filled(self.pending_slot):
+                        self.resolved.add(self.pending_slot)
+                    ack = self._acknowledge(changed)
                     nxt = self._next_question()
-                    suffix = ("\n" + nxt) if nxt else ""
-                    return chosen + suffix
+                    if ack:
+                        return chosen + "\n" + ack + ("\n" + nxt if nxt else "")
+                    return chosen + ("\n" + nxt if nxt else "")
         if intent == "reject_city":
             # Remember the rejected cities for the rest of the session, then
             # immediately recompute the picks. _format_recommendation() filters
@@ -1052,12 +1505,22 @@ def render_response_text(reply):
     # Forward-chaining advisories first, mirroring the old output.
     for msg in reply.get("advisories", []):
         lines.append("Note: " + msg)
+    # Data summary ("I compared N destinations ...") sits just above the header.
+    if reply.get("summary"):
+        lines.append(reply["summary"])
     lines.append(reply["header"])
     for r in reply["results"]:
+        # Title line: rank, city, country, and a friendly "[Great match]" tag —
+        # the customer sees how good the fit is WITHOUT any certainty-factor maths.
+        region_pretty = r["region"].replace("_", " ").title()
         lines.append("#" + str(r["rank"]) + " " + r["city"] + ", " + r["country"]
-                     + " (" + r["region"] + ", " + r["temp"] + ", " + r["budget"] + ")")
-        strong = (" | strong on " + ", ".join(r["strong_on"])) if r["strong_on"] else ""
-        lines.append("   confidence " + str(r["confidence"]) + " | " + r["explanation"] + strong)
+                     + " (" + region_pretty + ", " + r["temp"] + ", " + r["budget"]
+                     + ")  [" + r["match"] + "]")
         lines.append("   " + r["description"])
+        # Plain-English reasons (one bullet per criterion that mattered).
+        for reason in r.get("reasons", []):
+            lines.append("   - " + reason)
+        if r["strong_on"]:
+            lines.append("   Strong on: " + ", ".join(r["strong_on"]))
     lines.append(reply["footer"])
     return "\n".join(lines)

@@ -123,6 +123,17 @@ def score_destination(dest, query):
     # Score ONE destination. Included preferences become signed CF evidence.
     # Explicit exclusions become negative evidence. Missing criteria add no
     # evidence, so absence is not treated as a perfect match.
+    #
+    # PER-USER WEIGHTING: rules.RULE_CF is the BASE reliability of each kind of
+    # evidence (a property of the knowledge, MYCIN-style). On top of that, the
+    # user can make a criterion matter more or less to THEM via query["importance"]
+    # (e.g. {"budget": 1.3} when they said budget matters most, or {"climate":0.6}
+    # when they don't really care about the weather). The effective rule CF is the
+    # base scaled by that factor, clamped to a sane range. Default factor = 1.0, so
+    # with no stated priorities this behaves exactly like fixed weights.
+    importance = query.get("importance") or {}
+    RCF = {k: max(0.05, min(0.97, v * importance.get(k, 1.0)))
+           for k, v in rules.RULE_CF.items()}
     evidences = []
     details = {}
     include_memberships = {}
@@ -134,7 +145,7 @@ def score_destination(dest, query):
     if query.get("climate"):
         temp = _effective_temp(dest, query)
         m = fuzzy.fuzzy_or([fuzzy.climate_membership(temp, t) for t in query["climate"]])
-        cf = evidence_cf_from_membership(m, rules.RULE_CF["climate"])
+        cf = evidence_cf_from_membership(m, RCF["climate"])
         evidences.append(cf)
         details["climate"] = (m, cf)
         include_memberships["climate"] = m
@@ -146,38 +157,38 @@ def score_destination(dest, query):
         # rather than dominating the ranking.
         temp = _effective_temp(dest, query)
         m = fuzzy.climate_membership(temp, "mild")
-        cf = evidence_cf_from_membership(m, rules.RULE_CF["climate"]) * 0.3
+        cf = evidence_cf_from_membership(m, RCF["climate"]) * 0.3
         evidences.append(cf)
         details["seasonal_temp"] = (m, cf)
     if query.get("climate_exclude"):
         temp = _effective_temp(dest, query)
         m = fuzzy.fuzzy_or([fuzzy.climate_membership(temp, t) for t in query["climate_exclude"]])
-        cf = _negative_cf_from_membership(m, rules.RULE_CF["climate"])
+        cf = _negative_cf_from_membership(m, RCF["climate"])
         evidences.append(cf)
         details["climate_exclude"] = (m, cf)
 
     budget_preferences = _effective_budget_preferences(query)
     if budget_preferences:
         m = fuzzy.fuzzy_or([fuzzy.budget_membership(dest["budget_level"], lvl) for lvl in budget_preferences])
-        cf = evidence_cf_from_membership(m, rules.RULE_CF["budget"])
+        cf = evidence_cf_from_membership(m, RCF["budget"])
         evidences.append(cf)
         details["budget"] = (m, cf)
         include_memberships["budget"] = m
     if query.get("budget_exclude"):
         m = fuzzy.fuzzy_or([fuzzy.budget_membership(dest["budget_level"], lvl) for lvl in query["budget_exclude"]])
-        cf = _negative_cf_from_membership(m, rules.RULE_CF["budget"])
+        cf = _negative_cf_from_membership(m, RCF["budget"])
         evidences.append(cf)
         details["budget_exclude"] = (m, cf)
 
     if query.get("duration"):
         m = fuzzy.fuzzy_or([fuzzy.duration_membership(dest["ideal_durations"], dur) for dur in query["duration"]])
-        cf = evidence_cf_from_membership(m, rules.RULE_CF["duration"])
+        cf = evidence_cf_from_membership(m, RCF["duration"])
         evidences.append(cf)
         details["duration"] = (m, cf)
         include_memberships["duration"] = m
     if query.get("duration_exclude"):
         m = fuzzy.fuzzy_or([fuzzy.duration_membership(dest["ideal_durations"], dur) for dur in query["duration_exclude"]])
-        cf = _negative_cf_from_membership(m, rules.RULE_CF["duration"])
+        cf = _negative_cf_from_membership(m, RCF["duration"])
         evidences.append(cf)
         details["duration_exclude"] = (m, cf)
 
@@ -189,16 +200,23 @@ def score_destination(dest, query):
             user_vec = [lifestyle[d] for d in dims]
             city_vec = [dest[d] for d in dims]
             cos = cosine_similarity(user_vec, city_vec)
-            strength = (sum(city_vec) / len(city_vec)) / 5.0
-            lifestyle_fit = cos * strength
-            cf = evidence_cf_from_membership(lifestyle_fit, rules.RULE_CF["lifestyle"])
+            # Weighted strength: weight each city score by the user's importance
+            # for that dimension. A high city score on a low-priority dimension
+            # no longer boosts the result unfairly.
+            total_weight = sum(user_vec)
+            if total_weight > 0:
+                weighted_strength = sum(u * c for u, c in zip(user_vec, city_vec)) / (5.0 * total_weight)
+            else:
+                weighted_strength = 0.0
+            lifestyle_fit = cos * weighted_strength
+            cf = evidence_cf_from_membership(lifestyle_fit, RCF["lifestyle"])
             evidences.append(cf)
             details["lifestyle"] = (lifestyle_fit, cf)
     if query.get("lifestyle_exclude"):
         dims = [d for d in query["lifestyle_exclude"] if d in dest]
         if dims:
             m = max(dest[d] / 5.0 for d in dims)
-            cf = _negative_cf_from_membership(m, rules.RULE_CF["lifestyle"])
+            cf = _negative_cf_from_membership(m, RCF["lifestyle"])
             evidences.append(cf)
             details["lifestyle_exclude"] = (m, cf)
 
@@ -238,6 +256,19 @@ def build_working_memory(query):
     for dim, weight in (query.get("lifestyle") or {}).items():
         if weight >= 4:
             facts.add("wants:" + dim)
+    # Lifestyle exclusions become avoids: facts for the rule base.
+    for dim in query.get("lifestyle_exclude") or []:
+        facts.add("avoids:" + dim)
+    if query.get("lifestyle_exclude"):
+        facts.add("has:exclusions")
+    if query.get("budget_exclude"):
+        facts.add("has:exclusions")
+    # Travel-season facts let rules react to seasonal timing.
+    months = set(query.get("travel_months") or [])
+    if months & {12, 1, 2}:
+        facts.add("travel:winter")
+    if months & {6, 7, 8}:
+        facts.add("travel:summer")
     return facts
 
 
@@ -276,9 +307,10 @@ def recommend(destinations, query, top_n=5):
     #
     # NEW: countries_include / countries_exclude work exactly like their region
     # counterparts but filter on dest["country"] instead of dest["region"].
-    # Country filtering is checked FIRST (more specific), then region filtering.
-    # If a country filter is active the region filter is skipped for that dest
-    # because the country already implies the region.
+    # When BOTH a country filter and a region filter are active they are combined
+    # as a UNION: "Japan or Europe" keeps Japanese cities AND every European city,
+    # rather than letting the more specific country filter silently drop Europe.
+    # Exclusions (country or region) always remove a city regardless.
     include = query.get("regions_include") or []
     exclude = query.get("regions_exclude") or []
     countries_include = query.get("countries_include") or []
@@ -293,16 +325,14 @@ def recommend(destinations, query, top_n=5):
             # Region exclusion: drop if the city's region is in the exclude list.
             if dest["region"] in exclude:
                 continue
-            if apply_include:
-                # If a country include list is active, use it as the primary
-                # filter (exact match on country). A city that passes the country
-                # filter is automatically included regardless of region filter,
-                # because "I want Japan" implies the right region already.
-                if countries_include:
-                    if dest["country"] not in countries_include:
-                        continue
-                elif include and dest["region"] not in include:
-                    # No country filter — fall back to the normal region filter.
+            if apply_include and (countries_include or include):
+                # UNION semantics: when either include filter is active a city is
+                # kept if it satisfies the country list OR the region list. With
+                # only one of them active this reduces to that single filter; with
+                # both active "Japan or Europe" keeps Japan plus all of Europe.
+                in_country = bool(countries_include) and dest["country"] in countries_include
+                in_region  = bool(include) and dest["region"] in include
+                if not (in_country or in_region):
                     continue
             pool.append(dest)
         return pool
@@ -328,6 +358,12 @@ def recommend(destinations, query, top_n=5):
         facts.add("results:empty")
     elif top[0][0] < 0.3:
         facts.add("results:weak")
+    # Flag when a result contains features the user wanted to avoid.
+    if top and query.get("lifestyle_exclude"):
+        for exc_dim in query["lifestyle_exclude"]:
+            if any(dest.get(exc_dim, 0) >= 4 for _, dest, _ in top):
+                facts.add("results:contain_avoided")
+                break
     _, fired, messages = forward_chain(facts, rules.ADVISORY_RULES)
     return {"pool_size": len(pool), "results": top, "advisories": messages, "fired_rules": fired, "broadened": broadened}
 
@@ -365,6 +401,24 @@ _DURATION_HUMAN = {
     "One week": "a one-week stay",
     "Long trip": "a long trip",
 }
+
+
+def match_label(confidence):
+    # Turn the internal signed confidence (a certainty factor in [-1, 1]) into a
+    # plain word for the CUSTOMER. The end user never sees the raw CF number or
+    # the per-criterion maths — just how good the overall fit is. This is the
+    # "defuzzification into words" idea applied to the final confidence.
+    if confidence >= 0.85:
+        return "Excellent match"
+    if confidence >= 0.6:
+        return "Great match"
+    if confidence >= 0.35:
+        return "Good match"
+    if confidence >= 0.1:
+        return "Fair match"
+    if confidence >= -0.1:
+        return "Loose match"
+    return "Weak match"
 
 
 def _quality_word(membership):
