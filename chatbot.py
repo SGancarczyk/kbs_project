@@ -273,6 +273,8 @@ class TravelChatbot:
         self.query = {
             "regions_include": [],
             "regions_exclude": [],
+            "countries_include": [],
+            "countries_exclude": [],
             "climate": [],
             "climate_exclude": [],
             "budget": [],
@@ -325,7 +327,8 @@ class TravelChatbot:
         # Has this slot already received a value in the query, either as a wish
         # or as an explicit exclusion?
         if slot == "continent":
-            return bool(self.query["regions_include"]) or bool(self.query["regions_exclude"])
+            return (bool(self.query["regions_include"]) or bool(self.query["regions_exclude"])
+                    or bool(self.query["countries_include"]) or bool(self.query["countries_exclude"]))
         # The season slot is filled when at least one travel month was extracted.
         if slot == "season":
             return bool(self.query["travel_months"])
@@ -577,6 +580,7 @@ class TravelChatbot:
         # "avoid nightlife" affect the final reasoning instead of being lost.
         changed = {
             "regions_include": [], "regions_exclude": [],
+            "countries_include": [], "countries_exclude": [],
             "climate": [], "climate_exclude": [],
             "budget": [], "budget_exclude": [],
             "duration": [], "duration_exclude": [],
@@ -595,6 +599,16 @@ class TravelChatbot:
             if v not in self.query["regions_exclude"]:
                 self.query["regions_exclude"].append(v)
                 changed["regions_exclude"].append(v)
+
+        ctry = nlp.extract(text, kb.COUNTRY_SYNONYMS, allow_spellcheck=False, blocking_vocabulary=None)
+        for v in ctry["include"]:
+            if v not in self.query["countries_include"]:
+                self.query["countries_include"].append(v)
+                changed["countries_include"].append(v)
+        for v in ctry["exclude"]:
+            if v not in self.query["countries_exclude"]:
+                self.query["countries_exclude"].append(v)
+                changed["countries_exclude"].append(v)
 
         clim = nlp.extract(text, kb.CLIMATE_SYNONYMS, allow_spellcheck=self._allow_spellcheck_for("climate"), blocking_vocabulary=self._blocking_vocabulary_for(kb.CLIMATE_SYNONYMS))
         for v in clim["include"]:
@@ -719,6 +733,8 @@ class TravelChatbot:
         # clauses together with proper commas/"and".
         clauses = []
         # --- positive wishes (what the user DOES want) ---
+        if changed["countries_include"]:
+            clauses.append(_join_natural(changed["countries_include"]))
         if changed["regions_include"]:
             # Proper-case the regions so they read like place names.
             clauses.append(_join_natural([_pretty_region(r) for r in changed["regions_include"]]))
@@ -757,6 +773,8 @@ class TravelChatbot:
         if changed["travel_months"]:
             clauses.append("travelling in " + self._season_label(changed["travel_months"]))
         # --- exclusions (what the user does NOT want) ---
+        if changed["countries_exclude"]:
+            clauses.append("not " + _join_natural(changed["countries_exclude"]))
         if changed["regions_exclude"]:
             clauses.append("not " + _join_natural([_pretty_region(r) for r in changed["regions_exclude"]]))
         if changed["budget_exclude"]:
