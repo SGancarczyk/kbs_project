@@ -67,7 +67,7 @@ ensure_nltk_data()
 # Module-level singleton so we only construct it once per process.
 _lemmatizer = WordNetLemmatizer()
 
-NEGATION_WORDS = {"not", "no", "dont", "don't", "avoid", "without", "except", "never", "exclude", "hate", "skip"}
+NEGATION_WORDS = {"not", "no", "dont", "don't", "n't", "avoid", "without", "except", "never", "exclude", "hate", "skip"}
 NEGATION_CONNECTORS = {"or", "and", "nor"}
 
 
@@ -292,6 +292,13 @@ def extract(text, keyword_map, allow_spellcheck=True, blocking_vocabulary=None):
         raw   = raw_tokens[i]
         lemma = lemma_tokens[i]
 
+        # Skip "may" when it is a modal verb (MD tag) rather than the month May.
+        # NLTK reliably tags modal "may" as MD in context ("I may want Europe"),
+        # while calendar "may" in travel-time phrases ("in May") gets NN/NNP.
+        if raw == "may" and pos_tags[i][1] == "MD":
+            i += 1
+            continue
+
         if raw in NEGATION_CONNECTORS and negated_recently:
             # "not africa or asia" means both values should be excluded.
             pending_negate   = True
@@ -309,6 +316,24 @@ def extract(text, keyword_map, allow_spellcheck=True, blocking_vocabulary=None):
             negate_ttl = 0
 
         if lemma in NEGATION_WORDS or raw in NEGATION_WORDS:
+            # Before treating this token as a negation trigger, check whether it
+            # STARTS a multi-word phrase in the vocabulary (e.g. "not too hot"
+            # -> mild, "no frills" -> Budget). These phrases must be matched
+            # BEFORE "not"/"no" is consumed as negation, otherwise only the
+            # single-token match fires and the phrase meaning is lost.
+            phrase_matched, phrase_consumed = _match_exact_at(raw_tokens, lemma_tokens, i, keyword_map)
+            if phrase_matched is not None and phrase_consumed > 1:
+                value = keyword_map[phrase_matched]
+                if pending_negate:
+                    _add_unique(exclude, value)
+                    pending_negate   = False
+                    negate_ttl       = 0
+                    negated_recently = True
+                else:
+                    _add_unique(include, value)
+                i += phrase_consumed
+                continue
+            # No multi-word phrase matched: treat token as a negation trigger.
             pending_negate = True
             negate_ttl     = 20
             i += 1

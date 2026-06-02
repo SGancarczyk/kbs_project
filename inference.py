@@ -200,8 +200,15 @@ def score_destination(dest, query):
             user_vec = [lifestyle[d] for d in dims]
             city_vec = [dest[d] for d in dims]
             cos = cosine_similarity(user_vec, city_vec)
-            strength = (sum(city_vec) / len(city_vec)) / 5.0
-            lifestyle_fit = cos * strength
+            # Weighted strength: weight each city score by the user's importance
+            # for that dimension. A high city score on a low-priority dimension
+            # no longer boosts the result unfairly.
+            total_weight = sum(user_vec)
+            if total_weight > 0:
+                weighted_strength = sum(u * c for u, c in zip(user_vec, city_vec)) / (5.0 * total_weight)
+            else:
+                weighted_strength = 0.0
+            lifestyle_fit = cos * weighted_strength
             cf = evidence_cf_from_membership(lifestyle_fit, RCF["lifestyle"])
             evidences.append(cf)
             details["lifestyle"] = (lifestyle_fit, cf)
@@ -249,6 +256,19 @@ def build_working_memory(query):
     for dim, weight in (query.get("lifestyle") or {}).items():
         if weight >= 4:
             facts.add("wants:" + dim)
+    # Lifestyle exclusions become avoids: facts for the rule base.
+    for dim in query.get("lifestyle_exclude") or []:
+        facts.add("avoids:" + dim)
+    if query.get("lifestyle_exclude"):
+        facts.add("has:exclusions")
+    if query.get("budget_exclude"):
+        facts.add("has:exclusions")
+    # Travel-season facts let rules react to seasonal timing.
+    months = set(query.get("travel_months") or [])
+    if months & {12, 1, 2}:
+        facts.add("travel:winter")
+    if months & {6, 7, 8}:
+        facts.add("travel:summer")
     return facts
 
 
@@ -338,6 +358,12 @@ def recommend(destinations, query, top_n=5):
         facts.add("results:empty")
     elif top[0][0] < 0.3:
         facts.add("results:weak")
+    # Flag when a result contains features the user wanted to avoid.
+    if top and query.get("lifestyle_exclude"):
+        for exc_dim in query["lifestyle_exclude"]:
+            if any(dest.get(exc_dim, 0) >= 4 for _, dest, _ in top):
+                facts.add("results:contain_avoided")
+                break
     _, fired, messages = forward_chain(facts, rules.ADVISORY_RULES)
     return {"pool_size": len(pool), "results": top, "advisories": messages, "fired_rules": fired, "broadened": broadened}
 

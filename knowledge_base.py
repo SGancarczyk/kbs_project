@@ -606,7 +606,7 @@ CLIMATE_SYNONYMS = {
     # Warm
     "warm": "warm", "warmer": "warm", "hot": "warm", "hotter": "warm", "tropical": "warm",
     "sunny": "warm", "sun": "warm", "sunshine": "warm", "sunny day": "warm",
-    "summer": "warm", "heat": "warm", "scorching": "warm", "boiling": "warm",
+    "heat": "warm", "scorching": "warm", "boiling": "warm",
     "humid": "warm", "sweltering": "warm", "blazing": "warm",
     "beach weather": "warm", "swimwear": "warm", "tanning": "warm",
     # Vague-but-positive "I want nice weather" phrasings. In a holiday/swim
@@ -616,15 +616,18 @@ CLIMATE_SYNONYMS = {
     "lovely weather": "warm", "great weather": "warm", "beautiful weather": "warm",
     "perfect weather": "warm", "sunny weather": "warm", "hot weather": "warm",
     # Mild
-    "mild": "mild", "milder": "mild", "temperate": "mild", "spring": "mild",
-    "autumn": "mild", "fall": "mild",
+    "mild": "mild", "milder": "mild", "temperate": "mild",
     "pleasant": "mild", "moderate temperature": "mild", "comfortable weather": "mild",
     "not too hot": "mild", "not too cold": "mild", "in between": "mild",
     # Cold
     "cold": "cold", "colder": "cold", "cool": "cold", "cooler": "cold", "chilly": "cold",
-    "snowy": "cold", "snow": "cold", "winter": "cold",
+    "snowy": "cold", "snow": "cold",
     "freezing": "cold", "frosty": "cold", "icy": "cold",
     "crisp": "cold", "brisk": "cold", "arctic": "cold",
+    # NOTE: season words (summer/winter/spring/autumn/fall) are intentionally
+    # absent here. They live only in SEASON_SYNONYMS and set travel_months.
+    # Climate inference from season words leads to false positives: "summer in
+    # Japan" should set months, not automatically infer warm climate preference.
 }
 
 LIFESTYLE_SYNONYMS = {
