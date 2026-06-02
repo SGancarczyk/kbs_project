@@ -16,6 +16,26 @@ import os
 import pandas as pd    # replaces the built-in csv module for data loading
 
 LIFESTYLE_DIMENSIONS = ["culture", "adventure", "nature", "beaches", "nightlife", "cuisine", "wellness", "urban", "seclusion"]
+
+# LIFESTYLE_DESCRIPTIONS: short keyword-rich text for each lifestyle dimension.
+# Used by the TF-IDF cosine similarity matcher in chatbot.py to detect which
+# dimensions the user is talking about from a free-text sentence, without
+# needing the user to use an exact vocabulary word. Each string covers the
+# typical words a traveller would use when describing that interest.
+LIFESTYLE_DESCRIPTIONS = {
+    # Each description includes the dimension name itself so that users who
+    # literally say "nightlife" or "culture" get a direct TF-IDF match,
+    # alongside related activity words for natural-language descriptions.
+    "culture":   "culture cultural history museums art architecture temples heritage monuments ancient traditions cathedral ruins gallery opera civilisation",
+    "adventure": "adventure adventurous hiking trekking outdoor extreme climbing surfing safari diving rafting kayaking skiing bungee paragliding expedition",
+    "nature":    "nature natural mountains forests wildlife landscape scenery national parks rivers waterfalls jungle volcano glacier canyon desert",
+    "beaches":   "beaches beach coast ocean swimming sunbathing sand islands seaside snorkeling sailing reef lagoon tropical shore",
+    "nightlife": "nightlife bars clubs dancing parties music entertainment drinks going out cocktails pub concert festival buzzing lively",
+    "cuisine":   "cuisine food restaurants local dishes street food eating wine culinary gastronomy market brunch seafood tasting cooking",
+    "wellness":  "wellness spa yoga relax relaxation meditation retreat massage calm peaceful rejuvenate hot springs mindfulness detox tranquil",
+    "urban":     "urban city shopping skyline modern metropolitan cosmopolitan downtown trendy rooftop street art skyscrapers hip fashionable",
+    "seclusion": "seclusion secluded quiet remote isolated peaceful private off beaten path rural hidden undiscovered solitude escape untouched",
+}
 REGIONS = ["europe", "asia", "africa", "north_america", "south_america", "oceania", "middle_east"]
 BUDGET_LEVELS = ["Budget", "Mid-range", "Luxury"]
 DURATIONS = ["Day trip", "Weekend", "Short trip", "One week", "Long trip"]

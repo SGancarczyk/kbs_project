@@ -20,6 +20,139 @@ import random
 import knowledge_base as kb
 import nlp
 import inference as inf
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+# ----------------------------------------------------------------------------
+# LIFESTYLE TF-IDF MATCHER
+# Vectorizes the LIFESTYLE_DESCRIPTIONS corpus once at import time so every
+# call to match_lifestyle_dims() is just a transform + dot product — fast.
+# Using the same scipy cosine approach as chatbot__4_.ipynb.
+# ----------------------------------------------------------------------------
+_lifestyle_dims = list(kb.LIFESTYLE_DESCRIPTIONS.keys())
+_tfidf_vectorizer = TfidfVectorizer()
+_tfidf_matrix = _tfidf_vectorizer.fit_transform(
+    list(kb.LIFESTYLE_DESCRIPTIONS.values())
+)
+# Minimum cosine similarity score for a dimension to count as mentioned.
+# 0.05 is intentionally low — better to ask "how much do you care about X?"
+# than to silently miss something the user mentioned.
+_LIFESTYLE_THRESHOLD = 0.05
+
+# Intensity phrases ordered longest-first within each weight so "a little bit"
+# is matched before "bit". Checked in descending weight order so the highest
+# match wins.
+# Intensity vocabulary for per-dimension rating extraction.
+# Stored as a flat list sorted longest-phrase-first so "don't really care"
+# always beats "really" when both appear in the same segment.
+_INTENSITY_WORDS = {
+    5: ["must have", "must", "essential", "obsessed", "absolutely",
+        "most important", "top priority", "number one", "mainly",
+        "above all", "main focus", "all about", "crucial"],
+    4: ["really important", "very important", "really love", "really like",
+        "love", "very much", "big", "major", "important", "definitely",
+        "a lot", "so much", "super", "key", "high priority"],
+    3: ["enjoy", "nice to have", "fine with", "like", "nice", "decent",
+        "moderate", "okay", "ok", "alright", "not bad", "some"],
+    2: ["a little bit", "little bit", "not that important", "not very",
+        "don't really care", "dont really care", "not too", "not really",
+        "not much", "barely", "hardly", "secondary", "minor",
+        "if possible", "a little", "slight", "really"],
+    1: ["don't care about", "dont care about", "don't care", "dont care",
+        "irrelevant", "doesn't matter", "doesnt matter", "not important",
+        "not interested", "couldn't care", "couldnt care"],
+}
+# Pre-sorted flat list: (weight, phrase) longest phrase first
+_INTENSITY_SORTED = sorted(
+    [(w, p) for w, phrases in _INTENSITY_WORDS.items() for p in phrases],
+    key=lambda x: len(x[1]), reverse=True
+)
+# Phrases meaning "all detected dims" vs "all unmentioned dims"
+_ALL_PHRASES  = {"all of them", "all of these", "all equally",
+                 "all the same", "every one", "each one", "everything"}
+_REST_PHRASES = {"the rest", "the others", "everything else",
+                 "the other ones", "the remaining", "others", "rest of them"}
+
+
+def _match_lifestyle_dims(text):
+    # Return a dict of {dimension: cosine_score} for every dimension whose
+    # TF-IDF description is similar enough to the user's free text.
+    # Uses cosine similarity — same approach as chatbot__4_.ipynb
+    # rank_by_lifestyle / cosine_similarity.
+    user_vec = _tfidf_vectorizer.transform([text.lower()])
+    matched = {}
+    for i, dim in enumerate(_lifestyle_dims):
+        dim_vec = _tfidf_matrix[i]
+        dot    = (user_vec * dim_vec.T).toarray()[0][0]
+        norm_u = float((user_vec.multiply(user_vec)).sum() ** 0.5)
+        norm_d = float((dim_vec.multiply(dim_vec)).sum() ** 0.5)
+        if norm_u == 0 or norm_d == 0:
+            continue
+        score = dot / (norm_u * norm_d)
+        if score >= _LIFESTYLE_THRESHOLD:
+            matched[dim] = score
+    return dict(sorted(matched.items(), key=lambda x: -x[1]))
+
+
+def _score_segment(segment):
+    # Score a single text chunk: digit 1-5 wins, otherwise longest
+    # intensity phrase match. Returns None if nothing found.
+    import re as _re
+    numbers = _re.findall(r'\b([1-5])\b', segment)
+    if numbers:
+        return int(numbers[0])
+    for weight, phrase in _INTENSITY_SORTED:
+        if phrase in segment:
+            return weight
+    return None
+
+
+def _extract_per_dim_ratings(text, detected_dims):
+    # Parse a free-text "how much" answer and return {dim: weight 1-5}
+    # for each detected dimension mentioned.
+    #
+    # Strategy:
+    #   1. Split the answer into clauses by comma / conjunction / "except"
+    #   2. Each clause is scored independently (_score_segment)
+    #   3. Clauses with a dim name get that score assigned to that dim
+    #   4. "all of them are a 4" -> global score for unrated dims
+    #   5. "the rest don't really matter" -> rest score for unmentioned dims
+    import re as _re
+    t        = text.lower()
+    segments = [s.strip() for s in
+                _re.split(r'[,;]|\band\b|\bbut\b|\bthough\b|\bwhereas\b|\balso\b|\bexcept\b', t)
+                if s.strip()]
+    ratings      = {}
+    global_score = None
+    rest_score   = None
+
+    for seg in segments:
+        dims_in_seg = [d for d in detected_dims if d in seg]
+        score       = _score_segment(seg)
+        is_all      = any(p in seg for p in _ALL_PHRASES)
+        is_rest     = any(p in seg for p in _REST_PHRASES)
+
+        if is_all and not dims_in_seg and score is not None:
+            global_score = score
+        elif is_rest and not dims_in_seg and score is not None:
+            rest_score = score
+        elif dims_in_seg and score is not None:
+            for d in dims_in_seg:
+                ratings[d] = score
+        elif not dims_in_seg and score is not None and global_score is None:
+            global_score = score   # bare unattributed score — use as fallback
+
+    # "the rest" applies to explicitly unmentioned dims (more specific than global)
+    if rest_score is not None:
+        for d in detected_dims:
+            if d not in ratings:
+                ratings[d] = rest_score
+    # Global score fills anything still unrated
+    if global_score is not None:
+        for d in detected_dims:
+            if d not in ratings:
+                ratings[d] = global_score
+
+    return ratings
 
 # Words that mean "I have no preference for the thing you just asked" - they let
 # the user SKIP a slot instead of being forced to answer (un-menu-like).
@@ -132,7 +265,7 @@ _SMALL_TALK = {
     ],
     frozenset(["not sure", "i don't know", "i dont know", "idk", "no idea", "dunno"]): [
         "No problem. Let's figure it out together. Do you have a rough idea of what kind of weather you prefer, or what you like doing on holiday?",
-        "That's fine. Even a small detail helps — like whether you prefer beaches, cities, or mountains.",
+        "That's fine. Even a small detail helps, like whether you prefer beaches, cities, or mountains.",
     ],
 }
 
@@ -149,10 +282,10 @@ _CONFUSED_REPLIES = [
     ("I didn't quite understand that. You can tell me about destinations, budget, "
      "weather preferences, travel dates, or the kinds of activities you enjoy."),
     ("I didn't catch anything I recognise there. Try describing the trip in your "
-     "own words — for example, what you enjoy doing, roughly where you want to go, "
+     "own words, for example, what you enjoy doing, roughly where you want to go, "
      "or how long you have. Or type 'go' to see picks with what I have so far."),
-    ("I'm not sure I followed that. The more you describe about the trip — even "
-     "just the kind of atmosphere or activities you enjoy — the better I can match "
+    ("I'm not sure I followed that. The more you describe about the trip, even "
+     "just the kind of atmosphere or activities you enjoy, the better I can match "
      "you to somewhere."),
 ]
 
@@ -243,7 +376,11 @@ class TravelChatbot:
             ("duration",  "How long are you thinking of going for?"),
             ("budget",    "What kind of budget are you working with? For example, are you looking to keep costs down, or is it more of a treat yourself trip?"),
             ("climate",   "Do you have a preference for the weather? Warm and sunny, cooler, or somewhere in between?"),
-            ("lifestyle", "What usually makes a trip memorable for you? Things like food, culture, beaches, hiking, nightlife — or anything you'd rather avoid."),
+            # lifestyle is split into two conversational turns:
+            #   lifestyle_what     -> TF-IDF detects WHICH dimensions matter
+            #   lifestyle_how_much -> asks intensity only for detected dimensions
+            ("lifestyle_what",      "What kind of experiences do you look for on a trip?\n"                                    "Here's what I can match you on: culture, adventure, nature, beaches, nightlife, cuisine, wellness, urban, seclusion.\n"                                    "Just tell me which ones appeal to you, pick a few, describe them, or say something like \"beaches and good food, not too much nightlife\"."),
+            ("lifestyle_how_much",  ""),   # question built dynamically in _next_question()
         ]
 
     def _slot_filled(self, slot):
@@ -267,8 +404,17 @@ class TravelChatbot:
         # The season slot is filled when at least one travel month was extracted.
         if slot == "season":
             return bool(self.query["travel_months"])
-        if slot == "lifestyle":
-            return bool(self.query["lifestyle"]) or bool(self.query["lifestyle_exclude"])
+        if slot == "lifestyle_what":
+            # Filled once we have detected at least one dimension OR the user
+            # explicitly skipped (nothing to follow up on).
+            return (bool(self.query["lifestyle"]) or
+                    bool(self.query["lifestyle_exclude"]) or
+                    self._skipped.get("lifestyle_what", False))
+        if slot == "lifestyle_how_much":
+            # Only meaningful if lifestyle_what found some dimensions to ask
+            # about. Filled once weights have been set OR skipped.
+            pending = self._lifestyle_pending_dims()
+            return not pending or self._skipped.get("lifestyle_how_much", False)
         if slot == "climate":
             return bool(self.query["climate"]) or bool(self.query["climate_exclude"])
         if slot == "budget":
@@ -279,19 +425,27 @@ class TravelChatbot:
 
     def greeting(self):
         # The opening message (RESPONSE TYPE 1).
-        return ("Hi! I'm your travel assistant. Tell me a bit about the kind of trip "
-                "you're looking for and I'll help you find some great destinations. You "
-                "can mention a place, budget, trip length, climate, or what you enjoy — "
-                "all at once or bit by bit.\n"
-                "You can say 'skip' to move past any question, 'skip all' to jump "
-                "straight to recommendations, 'go' when you're ready, 'why' to see my "
-                "reasoning, 'restart' to start over, or 'exit' to quit.\n"
-                + self._next_question())
+        return (
+            "Hi! I'm here to help you find a trip that fits what you're looking for. "
+            "Tell me as much or as little as you like about your ideal getaway, and "
+            "I'll suggest some destinations. You can mention things like where you'd "
+            "like to go, your budget, how long you have, the kind of weather you enjoy, "
+            "or the activities you're interested in.\n\n"
+            "No need to answer everything at once. We can figure it out step by step.\n\n"
+            "A few helpful commands:\n"
+            "- skip: move past the current question\n"
+            "- skip all: jump straight to destination ideas\n"
+            "- go: get recommendations based on what we've discussed\n"
+            "- why: see why I suggested a destination\n"
+            "- restart: start over\n"
+            "- exit: end the conversation\n\n"
+            + self._next_question()
+        )
 
     def help_text(self):
         # The help message (RESPONSE TYPE 2).
         return ("I match you to travel destinations from a database of 560 cities. "
-                "Just describe what you want in your own words — for example: "
+                "Just describe what you want in your own words, for example: "
                 "'a cheap warm week in Asia, I love food and culture'. "
                 "I understand full sentences, fix small typos, and handle negation "
                 "like 'not Africa' or 'avoid nightlife'.\n"
@@ -325,11 +479,6 @@ class TravelChatbot:
         if self.last_results and self.last_results.get("results"):
             if self._has_rejection_cue(t) and self._cities_to_reject(text):
                 return "reject_city"
-        # MORE LIKE: "more like kyoto", "similar to paris"
-        if "like " in t or "similar to " in t:
-            for dest in self.destinations:
-                if dest["city"].lower() in t:
-                    return "more_like"
         # Anything else is treated as the user giving us preferences.
         return "provide"
 
@@ -419,6 +568,32 @@ class TravelChatbot:
                 keys.update(m.keys())
         return keys
 
+    def _lifestyle_pending_dims(self):
+        # Dimensions detected in lifestyle_what that haven't had their weight
+        # set yet. These are the ones we still need to ask "how much" about.
+        # A dimension is pending if it's in lifestyle but still at the default
+        # detection score (we stored the raw TF-IDF score as a float < 1.0
+        # temporarily; once the user answers "how much" we replace it with 1-5).
+        return [d for d, w in self.query["lifestyle"].items() if isinstance(w, float)]
+
+    def _lifestyle_how_much_question(self):
+        # Build a natural "how much do you care about X?" question covering only
+        # the pending dimensions. Invites a single free-text answer that rates
+        # all dims at once rather than asking one-by-one.
+        pending = self._lifestyle_pending_dims()
+        if not pending:
+            return None
+        if len(pending) == 1:
+            dim = pending[0]
+            return (f"How important is {dim} to you on this trip? "
+                    f"You can say something like \"{dim} is a must\" or "
+                    f"\"{dim} is maybe a 3 out of 5\", whatever feels natural.")
+        dims_str = _join_natural(pending)
+        return (f"You mentioned {dims_str}. How important is each one to you? "
+                f"Feel free to rate them 1-5, or just describe it, "
+                f"like \"cuisine is a must, nightlife maybe a 3, "
+                f"culture I don't really care about\".")
+
     def _has_meaningful_preferences(self):
         # Do not recommend from an empty query, because that only returns dataset
         # order with zero evidence. At least one include, exclude, or interest is
@@ -430,6 +605,7 @@ class TravelChatbot:
             self.query["budget"], self.query["budget_exclude"],
             self.query["duration"], self.query["duration_exclude"],
             self.query["lifestyle"], self.query["lifestyle_exclude"],
+            # float placeholders count — dimension was detected even if not yet weighted
             # travel_months alone counts as a meaningful preference because the
             # inference engine will use it to adjust climate scoring.
             self.query["travel_months"],
@@ -539,15 +715,77 @@ class TravelChatbot:
                 self.query["duration_exclude"].append(v)
                 changed["duration_exclude"].append(v)
 
-        life = nlp.extract(text, kb.LIFESTYLE_SYNONYMS, blocking_vocabulary=self._blocking_vocabulary_for(kb.LIFESTYLE_SYNONYMS))
-        for v in life["include"]:
-            if v not in self.query["lifestyle"]:
-                self.query["lifestyle"][v] = 5
-                changed["lifestyle"].append(v)
-        for v in life["exclude"]:
-            if v not in self.query["lifestyle_exclude"]:
-                self.query["lifestyle_exclude"].append(v)
-                changed["lifestyle_exclude"].append(v)
+        # LIFESTYLE — two-phase extraction:
+        #
+        # Phase 1 (lifestyle_what): TF-IDF cosine similarity detects WHICH
+        # dimensions the user cares about from their free-text description.
+        # Detected dimensions are stored with their raw cosine score as a float
+        # placeholder (e.g. 0.37). The float signals "detected but not yet
+        # weighted" so _lifestyle_pending_dims() can find them.
+        #
+        # Phase 2 (lifestyle_how_much): intensity words in the follow-up answer
+        # ("main focus", "nice to have", etc.) map to weights 1-5, replacing
+        # the float placeholder with the final integer weight.
+        #
+        # Exclusions ("I hate nightlife") are still handled by nlp.extract +
+        # LIFESTYLE_SYNONYMS so negation logic stays intact.
+
+        if self.pending_slot == "lifestyle_what":
+            # Phase 1: detect dimensions via TF-IDF.
+            detected = _match_lifestyle_dims(text)
+            # Run exclusion extraction FIRST so we know which dims were negated.
+            # TF-IDF sees "nightlife" in "not too much nightlife" and scores it —
+            # but nlp.extract correctly marks it as excluded. By running exclusions
+            # first, we can skip adding negated dims to lifestyle includes.
+            life_excl = nlp.extract(text, kb.LIFESTYLE_SYNONYMS,
+                                    blocking_vocabulary=self._blocking_vocabulary_for(kb.LIFESTYLE_SYNONYMS))
+            for v in life_excl["exclude"]:
+                if v not in self.query["lifestyle_exclude"]:
+                    self.query["lifestyle_exclude"].append(v)
+                    changed["lifestyle_exclude"].append(v)
+            # Extract any explicit intensity ratings from the same answer so we
+            # can store integers immediately. This avoids the lifestyle_how_much
+            # follow-up when the user has already given enough information.
+            included_dims = [d for d in detected if d not in self.query["lifestyle_exclude"]]
+            ratings = _extract_per_dim_ratings(text, included_dims)
+            # Now add detected dims, skipping any that were just excluded.
+            for dim in included_dims:
+                if dim not in self.query["lifestyle"]:
+                    # Use explicit rating if the user expressed one, else default 3.
+                    self.query["lifestyle"][dim] = ratings.get(dim, 3)
+                    changed["lifestyle"].append(dim)
+
+        elif self.pending_slot == "lifestyle_how_much":
+            # Phase 2: per-dimension rating extraction.
+            # Parse the user's free-text answer to assign a weight 1-5 to each
+            # pending dimension. "cuisine is a 5, nightlife maybe a 3, culture
+            # I don't really care" -> cuisine:5, nightlife:3, culture:2.
+            pending = self._lifestyle_pending_dims()
+            ratings = _extract_per_dim_ratings(text, pending)
+            for dim, weight in ratings.items():
+                self.query["lifestyle"][dim] = weight
+                if dim not in changed["lifestyle"]:
+                    changed["lifestyle"].append(dim)
+            # Any pending dim not mentioned gets default weight 3 (moderate).
+            for dim in pending:
+                if dim not in ratings:
+                    self.query["lifestyle"][dim] = 3
+                    if dim not in changed["lifestyle"]:
+                        changed["lifestyle"].append(dim)
+            # Also check for any NEW dimensions mentioned in this answer
+            # (e.g. "food is a 5 and actually beaches too") — add them directly
+            # with the score parsed from their clause.
+            extra = _match_lifestyle_dims(text)
+            for dim, score in extra.items():
+                if dim not in self.query["lifestyle"]:
+                    extra_ratings = _extract_per_dim_ratings(text, [dim])
+                    self.query["lifestyle"][dim] = extra_ratings.get(dim, 3)
+                    changed["lifestyle"].append(dim)
+
+        # else: outside the lifestyle slots — do nothing.
+        # Lifestyle is only extracted when the bot is actively on
+        # lifestyle_what or lifestyle_how_much, so earlier answers
+        # (continent, budget, etc.) never silently fill lifestyle prefs.
 
         # SEASON: month numbers are stored
         # in the query; the inference engine picks up the right monthly temp data.
@@ -597,16 +835,25 @@ class TravelChatbot:
         # clauses together with proper commas/"and".
         clauses = []
         # --- positive wishes (what the user DOES want) ---
-        if changed["countries_include"]:
-            # Country names are already properly capitalised in the KB.
-            clauses.append(_join_natural(changed["countries_include"]))
-        
-        # Only show regions that aren't the parent region of a newly added country
-        # This avoids saying "Japan, Asia" but allows "United States, Asia".
-        new_country_regions = {kb.country_to_region(c) for c in changed["countries_include"] if kb.country_to_region(c)}
-        explicit_regions = [r for r in changed["regions_include"] if r not in new_country_regions]
-        if explicit_regions:
-            clauses.append(_join_natural([_pretty_region(r) for r in explicit_regions]))
+        if changed["countries_include"] or changed["regions_include"]:
+            # Build one natural location clause that shows countries AND any
+            # regions that are not already implied by a named country.
+            # e.g. "i want asia or usa" -> countries=["United States"],
+            # regions=["north_america","asia"] -> show "United States and Asia"
+            # because north_america is implied by United States but asia is not.
+            parts = []
+            # Regions implied by the named countries (don't repeat them).
+            implied_regions = {kb.country_to_region(c) for c in changed["countries_include"]}
+            # Show each region that came from a direct continent match (not from
+            # a country derivation), so "asia" typed explicitly is always shown.
+            for r in changed["regions_include"]:
+                if r not in implied_regions:
+                    parts.append(_pretty_region(r))
+            # Show country names after regions so "Asia and United States" reads
+            # continent-first, which feels natural.
+            parts.extend(changed["countries_include"])
+            if parts:
+                clauses.append(_join_natural(parts))
         if changed["budget"]:
             # "Budget" -> "on a budget", "Luxury" -> "luxury", etc.
             clauses.append(_join_natural([_BUDGET_PHRASES.get(b, b.lower()) for b in changed["budget"]]))
@@ -616,8 +863,17 @@ class TravelChatbot:
         if changed["duration"]:
             clauses.append(_join_natural([_DURATION_PHRASES.get(d, d.lower()) for d in changed["duration"]]))
         if changed["lifestyle"]:
-            # Interests are already plain words ("culture", "food"-ish).
-            clauses.append("you enjoy " + _join_natural(changed["lifestyle"]))
+            # Split into confirmed (int weight set) vs pending (float placeholder).
+            # Confirmed dims say "you enjoy X", pending say "noted: X" since
+            # the how_much question hasn't been answered yet.
+            confirmed = [d for d in changed["lifestyle"]
+                         if isinstance(self.query["lifestyle"].get(d), int)]
+            pending   = [d for d in changed["lifestyle"]
+                         if isinstance(self.query["lifestyle"].get(d), float)]
+            if confirmed:
+                clauses.append("you enjoy " + _join_natural(confirmed))
+            if pending:
+                clauses.append("noted: " + _join_natural(pending))
         # NEW: confirm travel months back to the user in human-readable form.
         if changed["travel_months"]:
             clauses.append("travelling in " + self._season_label(changed["travel_months"]))
@@ -654,6 +910,14 @@ class TravelChatbot:
             return question
         self.pending_slot = None
         return None
+
+    def _sanitize_lifestyle_weights(self):
+        # Replace any float placeholders (TF-IDF scores stored in phase 1 before
+        # the user answered "how much") with the default weight 3 (moderate).
+        # This ensures inference.py always receives integer weights 1-5.
+        for dim, w in list(self.query["lifestyle"].items()):
+            if isinstance(w, float):
+                self.query["lifestyle"][dim] = 3
 
     def _format_recommendation(self):
         # Run the inference engine and turn its result into a friendly message
@@ -766,33 +1030,6 @@ class TravelChatbot:
             return payload
         return message + "\n" + payload
 
-    def _apply_similarity(self, text):
-        t = text.lower()
-        target_dest = None
-        for dest in self.destinations:
-            if dest["city"].lower() in t:
-                target_dest = dest
-                break
-        
-        if not target_dest:
-            return "I couldn't find that city in my database."
-
-        self.query["budget"] = [target_dest["budget_level"]]
-        self.query["climate"] = [target_dest["climate"]]
-        
-        self.query["lifestyle"] = {}
-        strong_dims = []
-        for dim in kb.LIFESTYLE_DIMENSIONS:
-            if target_dest.get(dim, 0) >= 4:
-                self.query["lifestyle"][dim] = 5
-                strong_dims.append(dim)
-        
-        self.rejected_cities.add(target_dest["city"])
-        
-        dims_text = _join_natural(strong_dims)
-        budget_text = target_dest["budget_level"].lower() if target_dest["budget_level"] != "Mid-range" else "mid-range"
-        return f"Got it. Looking for places with a similar vibe to {target_dest['city']} (strong on {dims_text}, {budget_text} budget, {target_dest['climate']} climate)."
-
     def respond(self, text):
         # THE MAIN ENTRY POINT. Given one user message, return the bot's reply.
         # The reply is normally a STRING, but a successful recommendation is a
@@ -814,9 +1051,6 @@ class TravelChatbot:
             return self._explain_last()
         if intent == "recommend":
             return self._format_recommendation()
-        if intent == "more_like":
-            ack = self._apply_similarity(text)
-            return self._lead(ack, self._format_recommendation())
         if intent == "greet":
             return "Hello! " + (self._next_question() or "Tell me about the kind of trip you have in mind and I'll suggest some destinations.")
         # SMALL TALK: pick a random reply from the matching set, then append the

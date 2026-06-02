@@ -1,7 +1,7 @@
 CHATBOT PROJECT — CHANGES FROM OLD VERSION TO NEW VERSION
 ==========================================================
 (Old = chatbot__3_.py / nlp.py (no NLTK) / knowledge_base.py (no countries/seasons))
-(New = chatbot.py / nlp.py (NLTK) / knowledge_base.py (with countries/seasons))
+(New = chatbot.py / nlp.py (NLTK) / knowledge_base.py (with countries/seasons/lifestyle TF-IDF))
 
 
 ================================================================
@@ -10,7 +10,8 @@ CHATBOT.PY
 
 1. TWO NEW SLOTS ADDED
    Old slots (5): continent, duration, budget, climate, lifestyle
-   New slots (7): continent, COUNTRY (new), SEASON (new), duration, budget, climate, lifestyle
+   New slots (8): continent, COUNTRY (new), SEASON (new), duration, budget, climate,
+                  LIFESTYLE_WHAT (new), LIFESTYLE_HOW_MUCH (new)
 
    - "country" slot: user can now say a specific country like "Japan" or "Brazil".
      The bot pins results to that country AND auto-fills the continent slot so it
@@ -18,238 +19,271 @@ CHATBOT.PY
    - "season" slot: user can now say a month ("July") or season ("summer").
      The bot stores the month numbers and the inference engine uses monthly
      temperature data instead of a yearly average when scoring climate.
+   - "lifestyle_what" slot (replaces old single "lifestyle" slot):
+     The bot shows all 9 lifestyle dimensions explicitly and asks the user to
+     describe which ones appeal to them in free text. TF-IDF cosine similarity
+     (same approach as chatbot__4_.ipynb) detects which dimensions match.
+   - "lifestyle_how_much" slot:
+     After detecting dimensions, the bot asks how important each one is (1–5).
+     The user can answer naturally ("cuisine is a must, nightlife maybe a 3")
+     and the bot parses per-dimension ratings from the free-text answer.
 
-2. SLOT QUESTIONS REWRITTEN — MORE CONVERSATIONAL
-   Old: "Where would you like to go? (e.g. Europe, Asia, South America - or say 'anywhere')"
-   New: "Do you already have a region in mind? You can mention somewhere specific like
-        Europe or Southeast Asia, or just say you're open to anything."
+2. LIFESTYLE SCORING NOW USES TF-IDF COSINE SIMILARITY
+   Old: keyword scanning via LIFESTYLE_SYNONYMS dictionary — a word had to exactly
+        match a vocabulary entry. Every matched dimension got hardcoded weight 5.
+   New: TF-IDF vectorizer (sklearn) matches free-text sentences against
+        LIFESTYLE_DESCRIPTIONS (keyword-rich strings per dimension). This means
+        "I enjoy walking through old towns and trying local street food" correctly
+        maps to culture + cuisine without requiring exact keyword matches.
+        Per-dimension weights 1–5 replace the flat weight-5 default.
+   Libraries used: sklearn.feature_extraction.text.TfidfVectorizer (same library
+   as chatbot__4_.ipynb notebook).
 
-   Old: "What's your budget like? (cheap, mid-range, or luxury)"
-   New: "What kind of budget are you working with? For example, are you looking to keep
-        costs down, or is it more of a treat yourself trip?"
+3. NEW MODULE-LEVEL FUNCTIONS FOR LIFESTYLE
+   - _match_lifestyle_dims(text): TF-IDF cosine similarity matching against
+     LIFESTYLE_DESCRIPTIONS, returns {dim: score} for dims above threshold.
+   - _score_segment(segment): scores a text clause as 1–5 using digit detection
+     first, then longest-phrase-first intensity word matching.
+   - _extract_per_dim_ratings(text, dims): splits answer into clauses by
+     punctuation/conjunctions, scores each clause, assigns per-dimension weights.
+     Handles "all of them are a 4", "the rest I don't care about", global fallback.
+   - _INTENSITY_WORDS / _INTENSITY_SORTED: intensity vocabulary sorted
+     longest-phrase-first so "don't really care" beats "really" in the same clause.
+   - _ALL_PHRASES / _REST_PHRASES: phrase sets for "all of them" and "the rest"
+     to support global and remainder scoring in one natural answer.
 
-   All 5 original questions were rewritten in this style — more like a person talking,
-   less like a form with options in brackets.
+4. NEW HELPER METHODS IN TravelChatbot
+   - _lifestyle_pending_dims(): finds dimensions stored as float placeholders
+     (detected in lifestyle_what but not yet rated by the user).
+   - _lifestyle_how_much_question(): builds a dynamic natural-language question
+     listing only the pending dimensions, inviting a 1–5 or descriptive answer.
+   - _slot_index(name): returns the index of a named slot in _slots().
+   - _sanitize_lifestyle_weights(): before inference runs, replaces any remaining
+     float placeholders with default weight 3 (moderate) so inference always
+     receives clean integers.
 
-3. SKIP_WORDS AND SKIP_PHRASES EXPANDED
-   Old SKIP_WORDS: 9 words (any, anywhere, whatever, skip, none, no, nope, idk, anything)
-   New SKIP_WORDS: ~30 words, adding: i, do, dont, mind, open, to, fine, sure, ok, okay,
-                   good, up, you, me, just, not, really, care, worry, worries, bother,
-                   fussed, doesnt, does, matter, n't
+5. LIFESTYLE EXTRACTION SCOPED TO LIFESTYLE SLOTS ONLY
+   Old: lifestyle keywords were scanned on every message throughout the conversation.
+   New: TF-IDF detection and exclusion extraction only run when pending_slot is
+        "lifestyle_what" or "lifestyle_how_much". Messages answering continent,
+        budget, season etc. never accidentally fill lifestyle preferences.
 
-   Old SKIP_PHRASES: 10 phrases
-   New SKIP_PHRASES: ~20 phrases, adding: "whatever works", "no idea", "surprise me",
-                   "up to you", "not bothered", "not fussed", "doesn't bother me",
-                   "not really", "not really sure"
+6. EXCLUSION-BEFORE-INCLUDE IN LIFESTYLE_WHAT
+   nlp.extract() runs for exclusions BEFORE TF-IDF adds includes. This means
+   "not too much nightlife" correctly excludes nightlife rather than including it
+   (TF-IDF would score the word "nightlife" positively regardless of negation).
 
-4. SKIP DETECTION USES NLTK TOKENIZER
-   Old: tokens = t.split()
-   New: tokens = [tok for tok in nlp.tokenize(t) if tok.isalpha()]
-   Effect: "don't" now splits into ["do", "n't"] so "i don't mind" is correctly
-   recognised as a skip. Old version would fail on contractions.
+7. FLOAT PLACEHOLDER PATTERN FOR TWO-PHASE LIFESTYLE
+   Phase 1 stores raw TF-IDF cosine scores as floats (e.g. 0.37) in
+   self.query["lifestyle"]. These signal "detected but not yet rated".
+   Phase 2 replaces them with integers 1–5 from the user's rating answer.
+   _lifestyle_pending_dims() identifies floats; _sanitize_lifestyle_weights()
+   cleans up any remaining floats before inference.
 
-5. SMALL-TALK HANDLING ADDED (entirely new)
-   Old: no small-talk detection at all — "hi", "thanks", "lol" fell through as
-        unrecognised preferences.
-   New: full _SMALL_TALK dictionary with varied replies for:
-        - Greetings: hi, hello, hey, yo, sup, howdy, hiya, heya
-        - How are you / doing well
-        - Thanks / thank you / cheers
-        - Cool / nice / great / awesome / ok / okay (ambiguous — may fall through)
-        - lol / haha / lmao
-        - Not sure / idk / dunno
+8. GO INTENT: SHORT MESSAGE GUARD
+   Old: any message containing "show me" triggered the recommend intent, including
+        long preference sentences like "I want to go somewhere like France, show
+        me your picks" — skipping preference extraction entirely.
+   New: recommend intent only fires for messages of 8 words or fewer, OR exact
+        command phrases like "go", "done", "show results". Long messages are
+        processed for preferences first, then results are shown if all slots done.
 
-6. "I DIDN'T UNDERSTAND" REPLIES NOW ROTATE
-   Old: one fixed confused reply hardcoded in respond()
-   New: _CONFUSED_REPLIES list with 3 different messages; random.choice() picks one.
-   Effect: the bot sounds less robotic when it fails to understand multiple times.
+9. GO INTENT: LIFESTYLE GATE
+   Old: "go" jumped straight to results even if lifestyle had never been asked.
+   New: if the user types "go" before any lifestyle input has been given, the bot
+        asks the lifestyle_what question first with a brief explanation. This ensures
+        the cosine similarity always has dimensions to score on.
 
-7. ROTATING OPENERS ARE CALMER/MORE NEUTRAL
-   Old openers: ["Perfect!", "Got it!", "Sure thing —", "Noted —",
-                 "Great choice —", "Awesome —", "Love it —"]
-   New openers: ["Got it.", "That helps.", "Sounds good.", "Thanks for sharing.",
-                 "Good to know.", "I'll keep that in mind.", "Okay.", "Makes sense."]
-   Effect: less over-eager in a longer conversation.
+10. _SKIPPED TRACKING: NOW CORRECTLY SET
+    Old: self._skipped was initialised in reset() but never written to when a skip
+         happened, so the country slot never auto-skipped after continent was skipped.
+    New: self._skipped[self.pending_slot] = True is set before resolving the slot,
+         so _slot_filled("country") correctly reads _skipped["continent"].
 
-8. NEW INTENT: "more_like"
-   Old: no such intent.
-   New: if the user says "more like Tokyo" or "similar to Paris", the bot looks up
-        that city in the database, copies its budget/climate/lifestyle dimensions
-        as the user's preferences, and immediately returns recommendations.
-        The city itself is added to rejected_cities so it doesn't appear in results.
+11. SLOT QUESTIONS REWRITTEN — MORE CONVERSATIONAL
+    Old: "Where would you like to go? (e.g. Europe, Asia, South America - or say 'anywhere')"
+    New: "Do you already have a region in mind? You can mention somewhere specific like
+         Europe or Southeast Asia, or just say you're open to anything."
+    All 5 original questions were rewritten in this style. The new lifestyle_what
+    question explicitly lists all 9 dimensions so users know what to respond to.
 
-9. NEW INTENT: "small_talk"
-   Old: no such intent — casual phrases caused confused replies.
-   New: detected in _detect_intent(), handled in respond() before falling through
-        to preference parsing.
+12. SKIP_WORDS AND SKIP_PHRASES EXPANDED
+    Old SKIP_WORDS: 9 words
+    New SKIP_WORDS: ~30 words, adding filler words so "i don't mind", "open to
+                    anything" etc. are correctly identified as skips.
+    Old SKIP_PHRASES: 10 phrases
+    New SKIP_PHRASES: ~20 phrases adding "whatever works", "no idea", "surprise me",
+                    "up to you", "not bothered", "not fussed" etc.
 
-10. _SKIPPED TRACKING ADDED
-    Old: no tracking of deliberately skipped slots.
-    New: self._skipped = {} in reset(). When a slot is skipped, _skipped[slot] = True.
-    Effect: the country slot uses this — if continent was explicitly skipped (meaning
-    the user is open to anywhere), asking "any specific country?" is skipped too.
+13. SKIP DETECTION USES NLTK TOKENIZER
+    Old: tokens = t.split()
+    New: tokens = [tok for tok in nlp.tokenize(t) if tok.isalpha()]
+    Effect: "don't" now splits to ["do", "n't"] so contractions work correctly.
 
-11. QUERY DICT EXTENDED
-    Old query keys:
-      regions_include, regions_exclude, climate, climate_exclude, budget,
-      budget_exclude, duration, duration_exclude, lifestyle, lifestyle_exclude
+14. SMALL-TALK HANDLING ADDED (entirely new)
+    Full _SMALL_TALK dictionary with varied replies for greetings, how-are-you,
+    thanks, cool/nice/ok (ambiguous — may fall through), lol/haha, not-sure/idk.
 
-    New query keys (additions):
-      countries_include, countries_exclude   (country-level filtering)
-      travel_months                          (list of month numbers for season)
+15. "I DIDN'T UNDERSTAND" REPLIES NOW ROTATE
+    Old: one fixed confused reply.
+    New: _CONFUSED_REPLIES list with 4 different messages; random.choice().
 
-12. _blocking_vocabulary_for() UPDATED
-    Old: blocked from 5 maps (continent, climate, budget, duration, lifestyle)
-    New: blocks from 7 maps — added COUNTRY_SYNONYMS and SEASON_SYNONYMS so
-         negation aimed at a country or season never leaks into other slots.
+16. ROTATING OPENERS ARE CALMER/MORE NEUTRAL
+    Old: ["Perfect!", "Got it!", "Noted —", "Great choice —", "Awesome —", ...]
+    New: ["Got it.", "That helps.", "Sounds good.", "Thanks for sharing.", ...]
 
-13. _has_meaningful_preferences() UPDATED
-    Old: checked 10 query keys (no country/season)
-    New: checks 13 query keys, including countries_include, countries_exclude,
-         and travel_months (travel_months alone counts as a meaningful preference).
+17. NEW INTENT: "more_like"
+    If the user says "more like Tokyo" or "similar to Paris", the bot copies that
+    city's budget/climate/lifestyle as the user's preferences and recommends.
 
-14. _update_slots() UPDATED
-    Old: extracted 5 slots per message (continent, climate, budget, duration, lifestyle)
-    New: extracts 7 slots per message, adding country and season extraction.
-         Country extraction also auto-derives the region and fills regions_include.
-         allow_spellcheck parameter removed (new nlp.extract has no such param).
+18. QUERY DICT EXTENDED
+    Old keys: regions_include, regions_exclude, climate, climate_exclude, budget,
+              budget_exclude, duration, duration_exclude, lifestyle, lifestyle_exclude
+    New keys: + countries_include, countries_exclude, travel_months
 
-15. WORDING CHANGES IN RESPONSES
-    Exit:    Old: "Thanks for chatting - safe travels! Goodbye."
-             New: "Thanks for stopping by. Have a great trip, and feel free to come
-                  back anytime you want more travel ideas."
+19. _blocking_vocabulary_for() UPDATED
+    Now blocks from 7 maps — added COUNTRY_SYNONYMS and SEASON_SYNONYMS.
 
-    Restart: Old: "Okay, fresh start."
-             New: "Sure, let's start over."
+20. _has_meaningful_preferences() UPDATED
+    Now checks 13 query keys including countries_include, countries_exclude,
+    travel_months (travel_months alone is meaningful).
 
-    Reject:  Old: "Got it, I've removed X. Here are updated picks:"
-             New: "Okay, I've removed X from the list. Here are some updated options:"
+21. WORDING CHANGES IN RESPONSES
+    Exit, restart, reject, skip-ack, skip-all, confused replies all updated
+    to be more conversational. See original document for old/new pairs.
 
-    Skip ack: Old: "No problem, skipping that."
-              New: "No problem, we can skip that."
-
-    Skip-all: Old: "Sure - skipping the rest and using what I have so far."
-              New: "Sure, I'll work with what you've given me so far."
-
-    Confused: Old: "I didn't catch a known option there. You can mention a continent..."
-              New: random.choice(_CONFUSED_REPLIES) — 3 rotating messages.
-
-    Advisories (CLI): Old used "Heads up: " prefix. New uses "Note: " prefix.
-
-16. import random ADDED
-    Old chatbot.py did not import random.
-    New imports random for rotating confused replies and small-talk selection.
+22. import random ADDED
 
 
 ================================================================
 NLP.PY
 ================================================================
 
-1. COMPLETELY DIFFERENT TOKENIZATION AND LEMMATIZATION
-   Old (hand-rolled, no external libraries):
-     - tokenize(): text.lower() -> regex replace punctuation -> .split()
-     - lemmatize(): manual suffix rules ("ies"->"y", strip "s", etc.)
-     - This satisfied a "100% implemented by us" course requirement.
+1. TOKENIZATION AND LEMMATIZATION REPLACED WITH NLTK
+   Old: hand-rolled tokenize() (regex + split) and lemmatize() (suffix rules).
+   New: nltk.word_tokenize() for tokenization; WordNetLemmatizer + nltk.pos_tag()
+        for lemmatization. Better accuracy on contractions, verb forms, plurals.
 
-   New (NLTK-based):
-     - tokenize(): nltk.word_tokenize(text.lower())
-     - lemmatize(): WordNetLemmatizer.lemmatize() with POS tag from nltk.pos_tag()
-     - Better accuracy on contractions ("don't"->["do","n't"]), verb forms,
-       and irregular plurals ("beaches"->"beach", "running"->"run").
-
-2. SPELL CORRECTION: EXISTS IN OLD, DISCONNECTED IN NEW
-   Old: Full working spell corrector (_spell_correct, edit_distance,
+2. SPELL CORRECTION COMPLETELY REMOVED
+   Old: working spell corrector (_spell_correct, edit_distance,
         _one_adjacent_transposition_away, SPELLCHECK_BLOCKLIST).
-        Called in extract() when allow_spellcheck=True.
-        Duration slot called with allow_spellcheck=False to avoid false positives.
+   New: all spell correction code removed. Reason: with NLTK lemmatization already
+        handling morphological variation (beaches->beach, running->run), spell
+        correction only introduced false positives — most dangerously,
+        "like" -> "lake" -> nature (common word one edit from a vocab keyword).
+        The SPELLCHECK_BLOCKLIST was a growing workaround that was never complete.
 
-   New: _one_adjacent_transposition_away helper still exists but is NEVER CALLED.
-        _spell_correct function is completely gone.
-        SPELLCHECK_BLOCKLIST is gone.
-        No spell correction happens at all in the new version.
-
-3. extract() SIGNATURE CHANGED
+3. extract() SIGNATURE SIMPLIFIED
    Old: extract(text, keyword_map, allow_spellcheck=True, blocking_vocabulary=None)
    New: extract(text, keyword_map, blocking_vocabulary=None)
-   The allow_spellcheck parameter was removed because spell correction is gone.
+   allow_spellcheck parameter removed along with all spell correction logic.
 
-4. normalize() AND THE HAND-ROLLED tokenize() STILL PRESENT BUT CHANGED
-   Old: normalize() used by tokenize(), which called .split()
-   New: normalize() still exists but tokenize() now uses word_tokenize() instead.
+4. POS TAGGING ADDED
+   nltk.pos_tag() runs on the full token list once per extract() call. Each tag
+   is converted to a WordNet POS constant so the lemmatizer picks the right
+   inflection table (noun/verb/adjective/adverb).
 
-5. POS TAGGING ADDED
-   New nlp.py runs nltk.pos_tag() on the full token list once, then passes
-   each tag to lemmatize() so the WordNet lemmatizer picks the right inflection
-   table (noun/verb/adjective/adverb). Old version had no POS tagging.
+5. negate_ttl CHANGED: 4 -> 20
+   Old: negation carried forward 4 tokens.
+   New: negation carries forward 20 tokens.
+   Effect: "I definitely do not want to go somewhere warm" no longer drops
+   the negation before reaching "warm" because of intervening filler words.
 
-6. NLTK DOWNLOADS ADDED
-   New nlp.py downloads punkt, punkt_tab, averaged_perceptron_tagger,
-   averaged_perceptron_tagger_eng, and wordnet on first run (silently).
+6. PUNCTUATION RESETS NEGATION (new)
+   Old: negation window had no sentence-boundary awareness.
+   New: sentence-ending punctuation (., !, ?, ;) resets pending_negate to False,
+        so "I don't like beaches. I love mountains" correctly excludes beaches
+        and includes mountains without the negation bleeding across sentences.
 
-7. negate_ttl VALUE CHANGED
-   Old: negate_ttl = 4  (negation carries forward 4 tokens)
-   New: negate_ttl = 20 (negation carries forward 20 tokens, much longer window)
-   Also added: negation is now fully cancelled by sentence-ending punctuation
-   (., !, ?, ;) in the new version. Old version had no punctuation reset.
-
-8. _match_exact_at() CHANGED
+7. _match_exact_at() CHANGED
    Old: tried both space-joined AND no-space-joined candidates
-        (e.g. "south"+"america" -> "southamerica" for lookup)
-        max window size: 3 tokens
-   New: tries ONLY space-joined candidates (removed the no-space join)
-        max window size: 5 tokens (increased to catch longer phrases)
-   Reason: nltk.word_tokenize keeps "southamerica" as one token if written
-   that way, so the no-space join was no longer needed and caused false
-   matches (e.g. "to"+"go" -> "togo" matching the country Togo).
+        (e.g. "to"+"go" -> "togo", "south"+"america" -> "southamerica")
+        max window: 3 tokens
+   New: space-joined candidates ONLY (no-space join removed).
+        max window: 5 tokens (increased to catch longer phrases).
+   Reason: word_tokenize keeps "southamerica" as one token if typed that way,
+   making the no-space join redundant. It was also causing false matches —
+   "to"+"go" -> "togo" matched the country Togo, consuming negation from
+   "do not want to go to Europe" and leaving Europe unexcluded.
+
+8. NLTK DATA DOWNLOADS
+   punkt, punkt_tab, averaged_perceptron_tagger, averaged_perceptron_tagger_eng,
+   wordnet downloaded silently on first run.
 
 
 ================================================================
 KNOWLEDGE_BASE.PY
 ================================================================
 
-1. COUNTRY_REGION DICTIONARY ADDED (entirely new, ~100+ entries)
-   Maps every country in the dataset to its region string, e.g.:
-   "Japan" -> "asia", "France" -> "europe", "Brazil" -> "south_america"
-   Used by the new country_to_region() helper function.
+1. COUNTRY_REGION DICTIONARY ADDED
+   Maps every dataset country to its region string.
+   Used by country_to_region() helper.
 
-2. COUNTRY_SYNONYMS VOCABULARY ADDED (entirely new)
-   Maps typed country names/variants to the canonical dataset country name, e.g.:
-   "japan" -> "Japan", "uk" -> "United Kingdom", "usa" -> "United States"
-   Used by chatbot._update_slots() to extract country-level preferences from text.
+2. COUNTRY_SYNONYMS VOCABULARY ADDED
+   Maps typed variants to canonical country names (493 keys).
+   Covers demonyms, capitals, abbreviations, common misspellings.
+   NO overlap with CONTINENT_SYNONYMS — each token matches exactly one vocabulary,
+   eliminating cross-slot false matches.
 
-3. SEASON_SYNONYMS VOCABULARY ADDED (entirely new)
-   Maps season/month words to canonical keys, e.g.:
-   "summer" -> "summer", "july" -> "july", "dec" -> "december"
-   Used by chatbot._extract_season() to fill the travel_months slot.
+3. CONTINENT_SYNONYMS REDUCED TO PURE REGION WORDS
+   Old: contained individual country names and city names (e.g. "japan"->"asia",
+        "tokyo"->"asia", "paris"->"europe") — 297 overlapping keys with
+        COUNTRY_SYNONYMS.
+   New: only genuine region/continent words remain (70 keys: "europe", "asia",
+        "scandinavia", "caribbean", "gulf", etc.). All country/city/demonym
+        entries moved to COUNTRY_SYNONYMS.
+   Effect: "japan" now only ever matches COUNTRY_SYNONYMS -> "Japan".
+           No token can match both vocabularies simultaneously.
 
-4. SEASON_MONTHS AND MONTH_NUMBER DICTIONARIES ADDED (entirely new)
+4. SEASON_SYNONYMS VOCABULARY ADDED
+   Maps season/month words to canonical keys used by season_to_months().
+
+5. SEASON_MONTHS AND MONTH_NUMBER DICTIONARIES ADDED
    SEASON_MONTHS: "winter"->[12,1,2], "spring"->[3,4,5], etc.
-   MONTH_NUMBER:  "january"->1, "february"->2, "jan"->1, etc.
-   Used by knowledge_base.season_to_months() to convert season/month keywords
-   to lists of month numbers for the inference engine.
+   MONTH_NUMBER:  "january"->1, "jan"->1, etc.
 
-5. season_to_months() HELPER FUNCTION ADDED (entirely new)
-   Converts a season/month key to a list of month numbers.
-   e.g. season_to_months("summer") -> [6, 7, 8]
-        season_to_months("july")   -> [7]
+6. season_to_months() AND country_to_region() HELPERS ADDED
+   season_to_months("summer") -> [6, 7, 8]
+   country_to_region("Japan") -> "asia"
 
-6. country_to_region() HELPER FUNCTION ADDED (entirely new)
-   Looks up a canonical country name in COUNTRY_REGION and returns its region.
-   e.g. country_to_region("Japan") -> "asia"
+7. LIFESTYLE_DESCRIPTIONS ADDED (new, for TF-IDF)
+   Nine keyword-rich strings, one per lifestyle dimension. Each includes the
+   dimension name itself so direct mentions ("nightlife", "culture") get a
+   TF-IDF match, alongside activity words for natural-language descriptions.
+   Used by _match_lifestyle_dims() in chatbot.py.
 
-7. DATA LOADING: csv MODULE -> pandas
-   Old: uses Python's built-in csv.DictReader
-   New: uses pandas (pd.read_csv)
-   The rest of the row processing (JSON parsing, int conversion, derived fields)
-   is similar but adapted to the pandas DataFrame API.
+8. DATA LOADING: csv MODULE -> pandas
+   Old: csv.DictReader + manual for-loop.
+   New: pd.read_csv(), .apply() for JSON columns, .to_dict(orient="records")
+        to output the same list-of-dicts the inference engine expects.
 
-8. CONTINENT_SYNONYMS: COUNTRY-LEVEL ENTRIES REMOVED
-   Old CONTINENT_SYNONYMS contained individual country names mapping to their
-   region (e.g. "spain"->"europe", "japan"->"asia", "egypt"->"africa").
-   These were used as a shortcut for country->region resolution.
-   New version removes most of these because the dedicated COUNTRY_SYNONYMS
-   vocabulary now handles country recognition properly and more precisely.
-   The continent vocabulary now focuses on region/continent words only.
+
+================================================================
+INFERENCE.PY
+================================================================
+
+1. cosine_similarity() REWRITTEN USING SCIPY
+   Old: hand-coded dot product and norm using Python loops and math.sqrt().
+   New: scipy.spatial.distance.cosine() (same library as chatbot__4_.ipynb).
+        scipy_cosine() returns distance (1 - similarity), so result is 1 - that.
+        numpy.linalg.norm() used for zero-vector guard.
+
+2. VECTOR MATH USES NUMPY ARRAYS
+   Old: user_vec and city_vec built as plain Python lists; sum()/len() for mean;
+        max() generator for lifestyle_exclude.
+   New: np.array() for vector construction; np.mean() for strength calculation;
+        np.max() for exclude penalty. Same semantics, faster C-level execution.
+
+3. SEASONAL TEMPERATURE SCORING ADDED
+   When travel_months is set in the query, score_destination() uses the city's
+   actual temperature for those months (via kb.seasonal_avg_temp()) rather than
+   the yearly average. This means "warm in December" correctly favours Sydney
+   over Stockholm.
+
+4. explain_human() ADDED
+   Human-readable per-city explanation facility for the GUI "Why this pick?" panel.
+   Translates raw membership/CF values into plain-English bullets like
+   "Climate — great match (warm, 26.1°C for your travel period)".
 
 
 ================================================================
@@ -257,18 +291,6 @@ APP.PY
 ================================================================
 
 No meaningful changes between old and new versions.
-Both files are identical in structure and logic.
-
-
-================================================================
-INFERENCE.PY
-================================================================
-
-Only one version exists (uploaded in the second batch).
-No old version was provided, so no diff is possible.
-The file contains: score_destination(), recommend(), explain(),
-explain_human(), cf_combine_many(), forward_chain(),
-build_working_memory(), and _effective_budget_preferences().
 
 
 ================================================================
@@ -277,14 +299,25 @@ SUMMARY TABLE
 
 File              | Key changes
 ------------------+----------------------------------------------------------
-chatbot.py        | +2 slots (country, season), small-talk, more_like intent,
-                  | expanded skip words, calmer openers, rotating confused
-                  | replies, _skipped tracking, extended query dict
+chatbot.py        | +3 slots (country, season, lifestyle split into 2);
+                  | TF-IDF lifestyle matching replaces keyword scanning;
+                  | per-dimension 1-5 ratings via free-text parsing;
+                  | lifestyle scoped to lifestyle slots only;
+                  | go intent guards (short message + lifestyle gate);
+                  | _skipped correctly set; small-talk; more_like intent;
+                  | expanded skip words; calmer openers; rotating confused
+                  | replies; extended query dict
 nlp.py            | NLTK tokenizer/lemmatizer replaces hand-rolled code;
-                  | spell correction removed; extract() signature simplified;
-                  | longer negation TTL (4->20); punctuation resets negation
-knowledge_base.py | COUNTRY_SYNONYMS, COUNTRY_REGION, SEASON_SYNONYMS,
-                  | SEASON_MONTHS, MONTH_NUMBER added; country_to_region()
-                  | and season_to_months() helpers added; pandas replaces csv
+                  | spell correction completely removed (false-positive risk);
+                  | extract() signature simplified; negate_ttl 4->20;
+                  | punctuation resets negation; _match_exact_at window 3->5;
+                  | no-space join removed (was causing "to"+"go"->"togo" bug)
+knowledge_base.py | COUNTRY_SYNONYMS (493 keys, zero overlap with CONTINENT);
+                  | CONTINENT_SYNONYMS reduced to 70 pure region words;
+                  | SEASON_SYNONYMS, SEASON_MONTHS, MONTH_NUMBER added;
+                  | LIFESTYLE_DESCRIPTIONS added (TF-IDF corpus);
+                  | country_to_region() and season_to_months() helpers;
+                  | pandas replaces csv module
+inference.py      | cosine_similarity() -> scipy; vector math -> numpy;
+                  | seasonal temperature scoring; explain_human() added
 app.py            | No changes
-inference.py      | Only one version available, no diff possible
