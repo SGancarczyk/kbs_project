@@ -356,6 +356,84 @@ def seasonal_avg_temp(avg_temp_monthly, months):
         return None
     return sum(avgs) / len(avgs)
 
+
+# ----------------------------------------------------------------------------
+# EXTRA DATA HELPERS — these read columns we already have (monthly min/max/avg
+# temperatures and latitude) to let the chatbot give richer, data-backed answers
+# such as "best time to visit", the warmest/coldest month, the typical day/night
+# range, and which hemisphere a city is in. No new data is invented; we only
+# summarise what is already in the Knowledge Base.
+# ----------------------------------------------------------------------------
+_MONTH_ABBR = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
+               7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
+
+
+def warmest_month(avg_temp_monthly):
+    """Return (month_number, avg_temp) for the hottest month, or None if no data."""
+    best = None
+    for k, v in avg_temp_monthly.items():
+        if best is None or v["avg"] > best[1]:
+            best = (int(k), v["avg"])
+    return best
+
+
+def coldest_month(avg_temp_monthly):
+    """Return (month_number, avg_temp) for the coldest month, or None if no data."""
+    best = None
+    for k, v in avg_temp_monthly.items():
+        if best is None or v["avg"] < best[1]:
+            best = (int(k), v["avg"])
+    return best
+
+
+def comfortable_months(avg_temp_monthly, low=18.0, high=30.0):
+    """Month numbers whose AVERAGE temperature sits in a pleasant band (18-30C
+    by default). This is our data-driven 'best time to visit' for warm-weather
+    travel."""
+    out = []
+    for k, v in avg_temp_monthly.items():
+        if low <= v["avg"] <= high:
+            out.append(int(k))
+    return sorted(out)
+
+
+def format_month_ranges(months):
+    """Turn a list of month numbers into a compact human string, collapsing runs
+    into ranges and joining the calendar wrap-around (Dec->Jan). Examples:
+    [5,6,7,8,9,10] -> 'May-Oct'; [1,2,12] -> 'Dec-Feb'; [4] -> 'Apr'."""
+    months = sorted(set(months))
+    if not months:
+        return ""
+    if len(months) == 12:
+        return "all year round"
+    # Wrap-around: if both January and December are present, rotate the list so a
+    # winter run reads naturally (e.g. Dec-Feb instead of Jan-Feb + Dec).
+    if 1 in months and 12 in months:
+        shifted = [m for m in months if m >= 7] + [m for m in months if m < 7]
+        months = shifted
+    runs = []
+    start = prev = months[0]
+    for m in months[1:]:
+        # Consecutive in calendar order (with Dec->Jan treated as consecutive).
+        if m == prev + 1 or (prev == 12 and m == 1):
+            prev = m
+            continue
+        runs.append((start, prev))
+        start = prev = m
+    runs.append((start, prev))
+    parts = []
+    for a, b in runs:
+        parts.append(_MONTH_ABBR[a] if a == b else _MONTH_ABBR[a] + "-" + _MONTH_ABBR[b])
+    return ", ".join(parts)
+
+
+def hemisphere(latitude):
+    """'southern' for cities below the equator (seasons flipped), else 'northern'."""
+    try:
+        return "southern" if float(latitude) < 0 else "northern"
+    except (TypeError, ValueError):
+        return "northern"
+
 def load_destinations(csv_path=None):
     # REWRITE: use pandas.read_csv() instead of csv.DictReader + for-loop.
     if csv_path is None:
@@ -434,6 +512,8 @@ CONTINENT_SYNONYMS = {
     "caribbean": "north_america",
     "central america": "north_america",
     "centralamerica": "north_america",
+    "north america": "north_america",
+    "united states": "north_america",
     "guadalajara": "north_america",
     "honduras": "north_america",
     "la": "north_america",
@@ -453,9 +533,11 @@ CONTINENT_SYNONYMS = {
     "latinamerica": "south_america",
     "rio de janeiro": "south_america",
     "south": "south_america",
+    "south america": "south_america",
     "southamerica": "south_america",
     # Oceania
     "brisbane": "oceania",
+    "new zealand": "oceania",
     "newzealand": "oceania",
     "oceania": "oceania",
     "pacific": "oceania",
@@ -489,7 +571,7 @@ BUDGET_SYNONYMS = {
     "fair": "Mid-range", "regular": "Mid-range",
     # Luxury
     "luxury": "Luxury", "luxurious": "Luxury",
-    "expensive": "Luxury", "premium": "Luxury",
+    "expensive": "Luxury", "pricier": "Luxury", "pricey": "Luxury", "premium": "Luxury",
     "high": "Luxury", "lavish": "Luxury", "fancy": "Luxury",
     "splurge": "Luxury", "upscale": "Luxury", "highend": "Luxury", "high-end": "Luxury",
     "fivestar": "Luxury", "five-star": "Luxury", "5star": "Luxury",
@@ -522,18 +604,24 @@ DURATION_SYNONYMS = {
 
 CLIMATE_SYNONYMS = {
     # Warm
-    "warm": "warm", "hot": "warm", "tropical": "warm",
+    "warm": "warm", "warmer": "warm", "hot": "warm", "hotter": "warm", "tropical": "warm",
     "sunny": "warm", "sun": "warm", "sunshine": "warm", "sunny day": "warm",
     "summer": "warm", "heat": "warm", "scorching": "warm", "boiling": "warm",
     "humid": "warm", "sweltering": "warm", "blazing": "warm",
     "beach weather": "warm", "swimwear": "warm", "tanning": "warm",
+    # Vague-but-positive "I want nice weather" phrasings. In a holiday/swim
+    # context these almost always mean warm and sunny, so we map them to warm
+    # (pairs naturally with beach/swim preferences).
+    "warm weather": "warm", "good weather": "warm", "nice weather": "warm",
+    "lovely weather": "warm", "great weather": "warm", "beautiful weather": "warm",
+    "perfect weather": "warm", "sunny weather": "warm", "hot weather": "warm",
     # Mild
-    "mild": "mild", "temperate": "mild", "spring": "mild",
+    "mild": "mild", "milder": "mild", "temperate": "mild", "spring": "mild",
     "autumn": "mild", "fall": "mild",
     "pleasant": "mild", "moderate temperature": "mild", "comfortable weather": "mild",
     "not too hot": "mild", "not too cold": "mild", "in between": "mild",
     # Cold
-    "cold": "cold", "cool": "cold", "chilly": "cold",
+    "cold": "cold", "colder": "cold", "cool": "cold", "cooler": "cold", "chilly": "cold",
     "snowy": "cold", "snow": "cold", "winter": "cold",
     "freezing": "cold", "frosty": "cold", "icy": "cold",
     "crisp": "cold", "brisk": "cold", "arctic": "cold",
@@ -593,7 +681,9 @@ LIFESTYLE_SYNONYMS = {
     "ocean": "beaches", "shore": "beaches",
     "sand": "beaches", "sandy": "beaches",
     "island": "beaches", "islands": "beaches",
-    "swimming": "beaches", "sunbathing": "beaches",
+    "swim": "beaches", "swims": "beaches", "swimming": "beaches",
+    "swimsuit": "beaches", "bathing suit": "beaches",
+    "sunbathing": "beaches",
     "snorkeling": "beaches", "diving": "beaches",
     "sailing": "beaches", "windsurfing": "beaches",
     "tropical beach": "beaches", "white sand": "beaches",
