@@ -390,6 +390,159 @@ b_imp = TravelChatbot(dests); b_imp.greeting()
 ack_imp = b_imp.respond("cheap, warm, but budget matters most")
 check("acknowledgement confirms the weighting", "weight" in ack_imp and "budget" in ack_imp)
 
+print("=== 15. NEW FEATURE TESTS (fixes from review checklist) ===")
+
+# --- Fix 1: Contraction negation (n't) ---
+r_dont_asia = nlp.extract("I don't want Asia", kb.CONTINENT_SYNONYMS)
+check("contraction: \"I don't want Asia\" excludes asia", "asia" in r_dont_asia["exclude"] and "asia" not in r_dont_asia["include"])
+r_dont_night = nlp.extract("I don't want nightlife", kb.LIFESTYLE_SYNONYMS)
+check("contraction: \"I don't want nightlife\" excludes nightlife", "nightlife" in r_dont_night["exclude"])
+bot_dont = TravelChatbot(dests); bot_dont.greeting()
+bot_dont.respond("I don't want Asia")
+check("chatbot: \"I don't want Asia\" -> regions_exclude contains asia", "asia" in bot_dont.query["regions_exclude"])
+bot_dont2 = TravelChatbot(dests); bot_dont2.greeting()
+bot_dont2.respond("I don't want nightlife")
+check("chatbot: \"I don't want nightlife\" -> lifestyle_exclude contains nightlife", "nightlife" in bot_dont2.query["lifestyle_exclude"])
+
+# --- Fix 2: Country negation leak ---
+r_nexp_jp = nlp.extract("not expensive Japan", kb.COUNTRY_SYNONYMS,
+                         blocking_vocabulary=set(kb.BUDGET_SYNONYMS.keys()))
+check("NLP: \"not expensive Japan\" -> Japan included (budget blocks negation)", "Japan" in r_nexp_jp["include"] and "Japan" not in r_nexp_jp["exclude"])
+r_nexp_bud = nlp.extract("not expensive Japan", kb.BUDGET_SYNONYMS)
+check("NLP: \"not expensive Japan\" -> Luxury excluded", "Luxury" in r_nexp_bud["exclude"])
+bot_nexp = TravelChatbot(dests); bot_nexp.greeting()
+bot_nexp.respond("not expensive Japan")
+check("chatbot: \"not expensive Japan\" -> Japan in countries_include", "Japan" in bot_nexp.query["countries_include"])
+check("chatbot: \"not expensive Japan\" -> Luxury in budget_exclude", "Luxury" in bot_nexp.query["budget_exclude"])
+check("chatbot: \"not expensive Japan\" -> Japan NOT in countries_exclude", "Japan" not in bot_nexp.query["countries_exclude"])
+bot_anjp = TravelChatbot(dests); bot_anjp.greeting()
+bot_anjp.respond("avoid nightlife Japan")
+check("chatbot: \"avoid nightlife Japan\" -> Japan in countries_include", "Japan" in bot_anjp.query["countries_include"])
+check("chatbot: \"avoid nightlife Japan\" -> nightlife in lifestyle_exclude", "nightlife" in bot_anjp.query["lifestyle_exclude"])
+check("chatbot: \"avoid nightlife Japan\" -> Japan NOT in countries_exclude", "Japan" not in bot_anjp.query["countries_exclude"])
+
+# --- Fix 3: Lifestyle "all" selection ---
+from chatbot import _parse_lifestyle_selection
+check("lifestyle: \"all\" selects all 9 dimensions", len(_parse_lifestyle_selection("all")) == 9)
+check("lifestyle: \"everything\" selects all 9 dimensions", len(_parse_lifestyle_selection("everything")) == 9)
+check("lifestyle: \"all of them\" selects all 9 dimensions", len(_parse_lifestyle_selection("all of them")) == 9)
+bot_all = TravelChatbot(dests); bot_all.greeting()
+bot_all.pending_slot = "lifestyle_pick"
+bot_all._update_slots("all")
+check("chatbot: typing \"all\" during lifestyle_pick fills all 9 dims", len(bot_all.query["lifestyle"]) == 9)
+
+# --- Fix 4: Importance detector ---
+def imp_of2(msg):
+    b = TravelChatbot(dests); b.greeting(); b.respond(msg)
+    return b.query["importance"]
+check("importance: \"budget is not important but climate matters most\" -> budget down", imp_of2("budget is not important but climate matters most").get("budget") == 0.6)
+check("importance: \"budget is not important but climate matters most\" -> climate up", imp_of2("budget is not important but climate matters most").get("climate") == 1.3)
+check("importance: \"budget matters most and climate matters most\" -> budget up", imp_of2("budget matters most and climate matters most").get("budget") == 1.3)
+check("importance: \"budget matters most and climate matters most\" -> climate up", imp_of2("budget matters most and climate matters most").get("climate") == 1.3)
+check("importance: \"beaches are a must\" -> lifestyle up (are a must cue)", imp_of2("beaches are a must").get("lifestyle") == 1.3)
+
+# --- Fix 5: Weighted lifestyle strength ---
+city_high = {k: 1 for k in kb.LIFESTYLE_DIMENSIONS}
+city_high["culture"] = 5; city_high["cuisine"] = 5
+city_low  = {k: 1 for k in kb.LIFESTYLE_DIMENSIONS}
+city_low["culture"] = 1; city_low["cuisine"] = 1
+q_life = {"lifestyle": {"culture": 5, "cuisine": 5}}
+score_high = inf.score_destination(city_high, q_life)["confidence"]
+score_low  = inf.score_destination(city_low,  q_life)["confidence"]
+check("weighted lifestyle: high-scoring city outranks low-scoring city", score_high > score_low)
+check("weighted lifestyle: low-scoring city is penalised (<0)", score_low < 0)
+
+# --- Fix 6: Country plus region logic ---
+bot_japan_asia = TravelChatbot(dests); bot_japan_asia.greeting()
+bot_japan_asia.respond("Japan in Asia")
+check("country+region: \"Japan in Asia\" -> Japan in countries_include", "Japan" in bot_japan_asia.query["countries_include"])
+check("country+region: \"Japan in Asia\" -> asia NOT in regions_include (descriptive)", "asia" not in bot_japan_asia.query["regions_include"])
+bot_japan_or_eu = TravelChatbot(dests); bot_japan_or_eu.greeting()
+bot_japan_or_eu.respond("Japan or Europe")
+check("country+region: \"Japan or Europe\" -> Japan in countries_include", "Japan" in bot_japan_or_eu.query["countries_include"])
+check("country+region: \"Japan or Europe\" -> europe in regions_include (explicit or)", "europe" in bot_japan_or_eu.query["regions_include"])
+
+# --- Fix 7: Summary mentions both countries and regions ---
+bot_sum2 = TravelChatbot(dests); bot_sum2.greeting()
+bot_sum2.respond("Japan or Europe")
+sum_reply2 = bot_sum2.respond("skip all")
+check("summary: mentions Japan when Japan+Europe active", isinstance(sum_reply2, dict) and "Japan" in sum_reply2.get("summary", ""))
+check("summary: mentions Europe when Japan+Europe active", isinstance(sum_reply2, dict) and "Europe" in sum_reply2.get("summary", ""))
+
+# --- Fix 8: Multiword phrases starting with negation ---
+r_nothot = nlp.extract("not too hot", kb.CLIMATE_SYNONYMS)
+check("NLP: \"not too hot\" -> mild (multiword phrase before negation fires)", r_nothot["include"] == ["mild"] and r_nothot["exclude"] == [])
+r_nofrills = nlp.extract("no frills", kb.BUDGET_SYNONYMS)
+check("NLP: \"no frills\" -> Budget (multiword phrase before negation fires)", r_nofrills["include"] == ["Budget"] and r_nofrills["exclude"] == [])
+r_notcold = nlp.extract("not too cold", kb.CLIMATE_SYNONYMS)
+check("NLP: \"not too cold\" -> mild", r_notcold["include"] == ["mild"] and r_notcold["exclude"] == [])
+
+# --- Fix 9: Season words do not auto-infer climate ---
+r_summer_clim = nlp.extract("summer in Japan", kb.CLIMATE_SYNONYMS)
+check("NLP: \"summer in Japan\" does NOT set warm climate (season word only sets months)", r_summer_clim["include"] == [])
+r_winter_clim = nlp.extract("I want to travel in winter", kb.CLIMATE_SYNONYMS)
+check("NLP: \"travel in winter\" does NOT set cold climate (season word only sets months)", r_winter_clim["include"] == [])
+bot_sumjp = TravelChatbot(dests); bot_sumjp.greeting()
+bot_sumjp.respond("summer in Japan")
+check("chatbot: \"summer in Japan\" sets travel months [6,7,8]", set(bot_sumjp.query["travel_months"]) == {6, 7, 8})
+check("chatbot: \"summer in Japan\" does NOT set climate", bot_sumjp.query["climate"] == [])
+check("chatbot: \"summer in Japan\" sets Japan in countries_include", "Japan" in bot_sumjp.query["countries_include"])
+
+# --- Fix 10: May as month vs modal ---
+r_may_modal = nlp.extract("I may want Europe", kb.SEASON_SYNONYMS,
+                           allow_spellcheck=False)
+check("NLP: \"I may want Europe\" does NOT extract May as travel month", r_may_modal["include"] == [])
+bot_may = TravelChatbot(dests); bot_may.greeting()
+bot_may.respond("I may want Europe")
+check("chatbot: \"I may want Europe\" -> no May in travel_months", 5 not in bot_may.query["travel_months"])
+check("chatbot: \"I may want Europe\" -> europe in regions_include", "europe" in bot_may.query["regions_include"])
+
+# --- Fix 12: Why explanations use recommendation snapshot ---
+bot_snap = TravelChatbot(dests); bot_snap.greeting()
+bot_snap.respond("warm cheap asia culture")
+snap_rec = bot_snap.respond("skip all")
+# Change query AFTER recommendation to simulate user refinement
+bot_snap.query["climate"] = ["cold"]
+why_snap = bot_snap.respond("why")
+check("why: explanation uses recommendation snapshot not current query", "warm" in why_snap.lower() or "climate" in why_snap.lower())
+check("why: snapshot is stored in last_results", "query" in bot_snap.last_results)
+
+# --- Fix 13: more_like preserves duration ---
+ath2 = next(d for d in dests if d["city"] == "Athens")
+bot_ml = TravelChatbot(dests); bot_ml.greeting()
+bot_ml.respond("I want a one week trip")
+bot_ml._more_like(ath2, "")
+check("more_like: preserves duration from earlier in conversation", bot_ml.query["duration"] == ["One week"])
+
+# --- Fix 14: Exclusion policy — avoid nightlife ---
+night_city2 = {k: 3 for k in kb.LIFESTYLE_DIMENSIONS}; night_city2["nightlife"] = 5
+quiet_city2 = {k: 3 for k in kb.LIFESTYLE_DIMENSIONS}; quiet_city2["nightlife"] = 1
+score_night = inf.score_destination(night_city2, {"lifestyle_exclude": ["nightlife"]})
+score_quiet = inf.score_destination(quiet_city2, {"lifestyle_exclude": ["nightlife"]})
+check("avoid nightlife: high-nightlife city is penalised more than low-nightlife", score_night["confidence"] < score_quiet["confidence"])
+out_avoid = inf.recommend(dests, {"lifestyle_exclude": ["nightlife"], "lifestyle": {"culture": 5}}, top_n=5)
+check("avoid nightlife: recommendation still produced with exclusion", len(out_avoid["results"]) > 0)
+
+# --- Fix 15: New forward chaining rules ---
+from inference import build_working_memory, forward_chain
+import rules as _rules
+q_nl_urban = {"lifestyle": {"urban": 5}, "lifestyle_exclude": ["nightlife"]}
+facts_nl_urban = build_working_memory(q_nl_urban)
+_, fired_nl, _ = forward_chain(facts_nl_urban, _rules.ADVISORY_RULES)
+check("forward chain: nightlife_urban_avoided fires when avoids:nightlife + wants:urban", "nightlife_urban_avoided" in fired_nl)
+
+q_winter_beach = {"travel_months": [12, 1, 2], "lifestyle": {"beaches": 5}}
+facts_wb = build_working_memory(q_winter_beach)
+_, fired_wb, _ = forward_chain(facts_wb, _rules.ADVISORY_RULES)
+check("forward chain: winter_beaches fires when travel:winter + wants:beaches", "winter_beaches" in fired_wb)
+
+# --- Fix 16 integration: avoid nightlife but I like urban culture ---
+bot_avu = TravelChatbot(dests); bot_avu.greeting()
+bot_avu.respond("avoid nightlife but I like urban culture")
+check("chatbot: \"avoid nightlife but I like urban culture\" -> nightlife excluded", "nightlife" in bot_avu.query["lifestyle_exclude"])
+check("chatbot: \"avoid nightlife but I like urban culture\" -> urban included", "urban" in bot_avu.query["lifestyle"])
+check("chatbot: \"avoid nightlife but I like urban culture\" -> culture included", "culture" in bot_avu.query["lifestyle"])
+
 print("=== SUMMARY ===")
 print("  passed:", PASSED, "| failed:", FAILED)
 if FAILED:

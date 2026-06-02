@@ -42,8 +42,14 @@ ADVISORY_RULES = [
     {"id": "beach_warm", "priority": 2, "if": ["wants:beaches", "climate:warm"], "then": "synergy:beach_warm", "message": "Nice - warm beach destinations are a classic sweet spot, so expect strong matches."},
     {"id": "culture_cuisine", "priority": 2, "if": ["wants:culture", "wants:cuisine"], "then": "synergy:culture_cuisine", "message": "Culture and cuisine pair beautifully - many cities excel at both."},
     {"id": "nature_adventure", "priority": 2, "if": ["wants:nature", "wants:adventure"], "then": "synergy:nature_adventure", "message": "Nature and adventure go hand in hand - lots of great fits for that."},
+    # ---- new feature interactions ----
+    {"id": "nightlife_urban_avoided", "priority": 4, "if": ["avoids:nightlife", "wants:urban"], "then": "tension:nightlife_urban", "message": "Urban destinations often have active nightlife — some of what you want to avoid may still appear in the results."},
+    {"id": "winter_beaches", "priority": 5, "if": ["travel:winter", "wants:beaches"], "then": "tension:winter_beach", "message": "Winter travel and beach holidays often clash — consider tropical or southern-hemisphere destinations where winter is their summer."},
+    {"id": "budget_luxury_exclude_conflict", "priority": 6, "if": ["budget:Luxury", "has:exclusions"], "then": "note:luxury_with_exclusions", "message": "You asked for luxury but also have active exclusions — results may be limited in this niche."},
     # ---- reactions to the actual results ----
     {"id": "results_broadened", "priority": 7, "if": ["results:broadened"], "then": "note:broadened", "message": "No destination matched your exact region, so I widened the search (still respecting any region you excluded)."},
     {"id": "results_empty", "priority": 7, "if": ["results:empty"], "then": "note:empty", "message": "I couldn't find anything matching all of that - try relaxing one wish (a region, the budget, or the climate)."},
     {"id": "results_weak", "priority": 4, "if": ["results:weak"], "then": "note:weak", "message": "These are the closest I found, but the matches are weak - loosening a criterion would help."},
+    {"id": "results_contain_avoided", "priority": 5, "if": ["results:contain_avoided"], "then": "warn:avoided_in_results", "message": "Some recommended places score on features you wanted to avoid — exclusions are soft evidence, not hard filters. Say 'restart' to start fresh with tighter constraints."},
+    {"id": "results_weak_exclusions", "priority": 4, "if": ["results:weak", "has:exclusions"], "then": "note:relax_exclusions", "message": "Matches are weak and you have active exclusions — relaxing some of them might open up better options."},
 ]

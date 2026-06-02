@@ -138,10 +138,12 @@ AI / KBS techniques used, and where
   documented fallback that broadens the search if the request yields nothing.
 
 - Cosine similarity (inference.py): lifestyle "taste" match between the user's
-  interest vector and the city's lifestyle scores, scaled by a strength factor
-  so a city that is merely "balanced" does not tie with one that is genuinely
-  strong on what the user cares about. Only the dimensions the user selected are
-  used, so unselected dimensions never distort the score.
+  interest vector and the city's lifestyle scores, scaled by a user-weighted
+  strength factor: weighted_strength = sum(user_weight * city_score) /
+  (5 * sum(user_weight)), so a low-priority dimension cannot unfairly boost a
+  city. lifestyle_fit = cosine_similarity * weighted_strength. Only the
+  dimensions the user selected are used, so unselected dimensions never distort
+  the score.
 
 - Slot filling + spell correction (chatbot.py + nlp.py): the bot fills one slot
   at a time from free text; a conservative, our-own Levenshtein corrector fixes
@@ -163,16 +165,39 @@ to, smth -> something, pls/plz -> please, u -> you, bc/cuz -> because, w/ ->
 with, w/o -> without, & -> and). It matches multi-word phrases before single
 words, so "south america", "north america", "latin america", "middle east",
 "new zealand", and "united states" are handled correctly and never collide.
+Multi-word phrases that begin with negation words (e.g. "not too hot" -> mild,
+"no frills" -> Budget) are matched BEFORE "not"/"no" triggers negation, so the
+phrase meaning is preserved.
+
+Contractions: NLTK tokenizes "don't" -> ["do", "n't"]. The NLP layer treats
+"n't" as a negation trigger, so "I don't want Asia" correctly excludes Asia.
+
+"may" as a modal verb vs month: NLTK's POS tagger tags "may" as MD (modal
+auxiliary) in "I may want Europe". The NLP layer skips modal "may" so it is
+never extracted as the month May; "I may want Europe" only sets Europe.
+
+Season words (summer, winter, spring, autumn, fall) set travel_months only.
+They do NOT automatically infer a climate preference, to avoid false positives
+like "summer in Japan" setting warm climate. Use explicit weather words
+("warm", "hot", "cold", etc.) to express a climate preference.
 
 Exclusions are preserved and used by inference: "not expensive" penalizes Luxury
 destinations, "avoid nightlife" penalizes cities with high nightlife scores, and
-"not Africa or Asia" excludes both regions. If the user gives no meaningful
-preference, the chatbot asks for at least one preference instead of returning
-arbitrary zero-confidence recommendations.
+"not Africa or Asia" excludes both regions. Exclusions work as soft negative CF
+evidence (not hard filters); the forward-chaining rules emit a warning when
+recommended cities still score on excluded features. If the user gives no
+meaningful preference, the chatbot asks for at least one preference instead of
+returning arbitrary zero-confidence recommendations.
 
-Region + country: if the user names both (e.g. "Japan or Europe"), the engine
-keeps the UNION (Japanese cities AND all European cities) rather than dropping
-one. Excluded regions/countries are always removed.
+Region + country: if the user names both with explicit "or" (e.g. "Japan or
+Europe"), the engine uses UNION semantics (Japanese cities AND all European
+cities). If the user names a country and its containing region WITHOUT "or"
+(e.g. "Japan in Asia"), the region is treated as descriptive and the more
+specific country filter is used. Excluded regions/countries are always removed.
+
+The "why" explanation always reflects the query that generated the visible
+recommendations, not any refinements typed since. "more like <city>" preserves
+the user's explicit duration and travel-month constraints.
 
 Memory (rejected cities): after picks are shown you can say "not Paris",
 "remove Barcelona", "not the first one", or "exclude those cities". The bot
@@ -194,12 +219,19 @@ external recommender system.
 Validation
 ==========
 Run: python3 tests.py
-The suite checks, among other things: data loading; the NLP pipeline and known
-false-positive cases (cheap->warm, mild->Mid-range, short->Long trip, multi-word
-regions, "not Africa or Asia"); the Levenshtein corrector; fuzzy membership
-values; the certainty-factor maths (CF = MB-MD and the three MYCIN combination
-cases); cosine similarity and the lifestyle strength factor; recommender
-filtering/ranking including the country+region union; forward-chaining advisory
-rules (including a chained rule); exclusion penalties; budget-conflict handling;
-confidence gating for hard failures; empty-query behaviour; and chatbot-level
-conversation flow. The final line prints a pass/fail summary.
+The suite checks (210 assertions): data loading; NLP pipeline and false-positive
+guards (cheap->warm, mild->Mid-range, short->Long trip, multi-word regions, "not
+Africa or Asia"); contraction negation ("I don't want Asia"); multiword negation
+phrases ("not too hot" -> mild, "no frills" -> Budget); season words not
+inferring climate ("summer in Japan"); modal "may" not becoming May ("I may want
+Europe"); country negation leak ("not expensive Japan" keeps Japan); lifestyle
+"all" selection; compound importance sentences ("budget is not important but
+climate matters most"); "are a must" cue; country+region deduplication ("Japan
+in Asia"); union semantics ("Japan or Europe"); summary mentions both active
+filters; Levenshtein corrector; fuzzy membership values; the CF maths (MB-MD and
+the three MYCIN combination cases); weighted lifestyle strength; recommender
+filtering/ranking; forward-chaining advisory rules (including chained rules and
+the new winter_beaches and nightlife_urban_avoided rules); exclusion penalties;
+budget-conflict handling; confidence gating; empty-query behaviour; chatbot
+conversation flow; "why" snapshot correctness; "more like" duration preservation.
+The final line prints a pass/fail summary.
