@@ -1,57 +1,19 @@
-# nlp.py
-# ----------------------------------------------------------------------------
-# THE NATURAL-LANGUAGE LAYER of the chatbot interface.
-# It turns a messy user sentence into clean facts for the rest of the KBS:
-# normalize, tokenize, lemmatize, match domain vocabulary, correct small typos,
-# and handle negation such as "not asia" or "avoid nightlife".
-#
-# NLP libraries used (allowed by the course as assisting NLP tools): NLTK for
-# tokenization and lemmatization.
-#   - tokenize()  : nltk.word_tokenize() (handles contractions/punctuation)
-#   - lemmatize() : WordNetLemmatizer.lemmatize() guided by nltk.pos_tag()
-# Everything else (vocabulary matching, negation propagation, multi-word phrase
-# matching, blocking vocabulary, and the conservative spell corrector) is our
-# own code.
-#
-# PUBLIC API:
-#   extract(text, keyword_map, allow_spellcheck=True, blocking_vocabulary=None)
-#       -> {"include": [...], "exclude": [...]}
-#   _normalize_common_phrases(text) -> str
-#   edit_distance(a, b) -> int   (Levenshtein distance, used by the corrector)
-#
-# NLTK DATA: the resources below are downloaded once on first import (silent if
-# already present). ensure_nltk_data() makes the failure mode explicit: in a
-# clean environment WITHOUT internet it raises a clear RuntimeError telling the
-# user which `nltk.download(...)` calls to run, instead of a cryptic LookupError
-# deep inside word_tokenize() later on. See README "Setup" for the exact commands.
-# ----------------------------------------------------------------------------
 import re
 import nltk
 from nltk.stem import WordNetLemmatizer
 from nltk.tokenize import word_tokenize
-
-# Resources we rely on: tokenizer models (punkt/punkt_tab), the POS tagger
-# (averaged_perceptron_tagger*), and the lemma dictionary (wordnet/omw-1.4).
 _REQUIRED_NLTK = ("punkt", "punkt_tab", "averaged_perceptron_tagger",
                   "averaged_perceptron_tagger_eng", "wordnet", "omw-1.4")
-
-
 def ensure_nltk_data():
-    # Try to download every required resource once. nltk.download is a no-op when
-    # the data is already on disk, so this is cheap on repeat runs. If the data
-    # is missing AND we cannot fetch it (e.g. offline), we surface a single clear
-    # message with the exact commands to run, rather than letting a LookupError
-    # explode unexplained from inside the tokenizer on the first real sentence.
     for pkg in _REQUIRED_NLTK:
         try:
             nltk.download(pkg, quiet=True)
         except Exception:
-            # A network error here is not fatal yet — the resource may already be
-            # cached. We only complain (below) if it is genuinely unavailable.
             pass
     try:
-        word_tokenize("warm weather")             # smoke test: needs punkt + tagger
-        WordNetLemmatizer().lemmatize("beaches")   # smoke test: needs wordnet
+        word_tokenize("warm weather")
+        nltk.pos_tag(["warm", "weather"])
+        WordNetLemmatizer().lemmatize("beaches")
     except LookupError as exc:
         raise RuntimeError(
             "Required NLTK data is missing and could not be downloaded "
@@ -60,66 +22,31 @@ def ensure_nltk_data():
             + "; ".join("nltk.download('" + p + "')" for p in _REQUIRED_NLTK)
             + "\"\nOriginal error: " + str(exc)
         ) from exc
-
-
 ensure_nltk_data()
-
-# Module-level singleton so we only construct it once per process.
 _lemmatizer = WordNetLemmatizer()
-
 NEGATION_WORDS = {"not", "no", "dont", "don't", "n't", "avoid", "without", "except", "never", "exclude", "hate", "skip"}
 NEGATION_CONNECTORS = {"or", "and", "nor"}
-
-
-# ----------------------------------------------------------------------------
-# INFORMAL-PHRASE NORMALIZATION (runs BEFORE tokenization).
-# The tokenizer + spell corrector are good at single mistyped words, but they
-# cannot expand chat shorthand like "wanna" (one token that should become two
-# words) or symbols like "&" / "w/". Those slip through because they are not
-# typos of any vocabulary word - they are different tokens entirely. So we do a
-# cheap regex pass on the RAW sentence first, rewriting common informal inputs
-# into their plain-English form. Everything downstream (tokenize, lemmatize,
-# vocabulary matching, negation) then benefits automatically.
-# ----------------------------------------------------------------------------
-# Word-shaped replacements: \b...\b makes sure we only swap WHOLE words, so
-# "u" -> "you" never touches "blue", and "bc" never touches "abcdef".
 _INFORMAL_WORD_REPLACEMENTS = [
     (r"\bwanna\b", "want to"),
     (r"\bgonna\b", "going to"),
     (r"\bgotta\b", "got to"),
-    (r"\bsmth\b",  "something"),
-    (r"\bpls\b",   "please"),
-    (r"\bplz\b",   "please"),
-    (r"\bu\b",     "you"),
-    (r"\bbc\b",    "because"),
-    (r"\bcuz\b",   "because"),
-    (r"\bcoz\b",   "because"),
+    (r"\bsmth\b", "something"),
+    (r"\bpls\b", "please"),
+    (r"\bplz\b", "please"),
+    (r"\bu\b", "you"),
+    (r"\bbc\b", "because"),
+    (r"\bcuz\b", "because"),
+    (r"\bcoz\b", "because"),
 ]
-
-
 def _normalize_common_phrases(text):
-    # Expand chat shorthand into plain English. Order matters for the symbol
-    # rules: "w/o" (without) must be handled BEFORE "w/" (with), otherwise the
-    # "w/" rule would fire first and leave a stray "o" behind.
     result = text
     for pattern, replacement in _INFORMAL_WORD_REPLACEMENTS:
-        # re.IGNORECASE so "Wanna" and "WANNA" are both caught.
         result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
-    # Symbol-based shorthand. These are plain substring swaps because regex word
-    # boundaries (\b) do not behave intuitively next to "/" and "&".
     result = result.replace("w/o", "without").replace("W/o", "without").replace("W/O", "without")
     result = result.replace("w/", "with").replace("W/", "with")
     result = result.replace("&", " and ")
     return result
-
-
 def _pos_to_wordnet(tag):
-    # Convert a Penn Treebank POS tag (from nltk.pos_tag) into a WordNet POS
-    # constant so WordNetLemmatizer.lemmatize() picks the right inflection table.
-    # Without this, lemmatize() defaults to NOUN for everything, which is wrong
-    # for verbs ("running" -> "running") and adjectives ("better" -> "better").
-    #   J* -> adjective   N* -> noun (default)
-    #   V* -> verb        R* -> adverb
     if tag.startswith("J"):
         return "a"
     if tag.startswith("V"):
@@ -128,36 +55,13 @@ def _pos_to_wordnet(tag):
         return "n"
     if tag.startswith("R"):
         return "r"
-    return "n"   # safe default: noun
-
-
+    return "n"
 def tokenize(text):
-    # REWRITE: replaced normalize(text).split() with nltk.word_tokenize().
-    # nltk.word_tokenize handles contractions ("don't" -> ["do", "n't"]),
-    # hyphenated words, and punctuation more accurately than a simple split,
-    # matching the approach demonstrated in NLP_Hands_on__3_.ipynb section 1.1.
-    # We return plain lowercase strings, exactly as the original did, so the
-    # rest of extract() sees no change in token format.
     return [t.lower() for t in word_tokenize(text.lower())]
-
-
 def lemmatize(token, pos_tag="NN"):
-    # REWRITE: replaced the hand-written suffix-stripping rules with
-    # WordNetLemmatizer.lemmatize(), using the WordNet POS constant derived from
-    # the Penn Treebank tag. This gives correct forms like:
-    #   "beaches" -> "beach"  (was correct with old rules too)
-    #   "running" -> "run"    (old rules kept it as "running")
-    #   "better"  -> "good"   (old rules kept it as "better")
-    # The pos_tag parameter defaults to "NN" (noun) so callers that do not
-    # pass a tag get the same behaviour as the old lemmatize(token).
     wn_pos = _pos_to_wordnet(pos_tag)
     return _lemmatizer.lemmatize(token, pos=wn_pos)
-
-
-
-
 def _one_adjacent_transposition_away(token, candidate):
-    # Handles common typos like "chaep" -> "cheap" and "asai" -> "asia".
     if len(token) != len(candidate):
         return False
     diffs = [i for i, (a, b) in enumerate(zip(token, candidate)) if a != b]
@@ -165,54 +69,25 @@ def _one_adjacent_transposition_away(token, candidate):
         return False
     i, j = diffs
     return j == i + 1 and token[i] == candidate[j] and token[j] == candidate[i]
-
-
 def edit_distance(a, b):
-    # Classic Levenshtein distance: the minimum number of single-character
-    # insertions, deletions, or substitutions to turn string a into string b.
-    # Used by the conservative spell corrector below (and exercised by tests).
     m, n = len(a), len(b)
-    # prev[j] = distance between a[:i] and b[:j]; we keep just one row to save space.
     prev = list(range(n + 1))
     for i in range(1, m + 1):
         cur = [i] + [0] * n
         for j in range(1, n + 1):
             cost = 0 if a[i - 1] == b[j - 1] else 1
-            cur[j] = min(prev[j] + 1,        # deletion
-                         cur[j - 1] + 1,     # insertion
-                         prev[j - 1] + cost) # substitution / match
+            cur[j] = min(prev[j] + 1,
+                         cur[j - 1] + 1,
+                         prev[j - 1] + cost)
         prev = cur
     return prev[n]
-
-
-# Common English words that sit one edit away from a vocabulary keyword. We never
-# auto-correct these, so an ordinary word the user actually meant is not silently
-# rewritten into a travel keyword (the classic "like" -> "lake" -> nature trap).
 _SPELLCHECK_BLOCKLIST = {
     "like", "lake", "want", "wants", "good", "great", "place", "places",
     "there", "where", "these", "those", "thing", "things", "think", "really",
     "about", "around", "would", "could", "should", "going", "visit", "trip",
     "trips", "love", "need", "very", "some", "more", "make", "take", "time",
 }
-
-
 def _spell_correct(token, vocabulary):
-    # Conservative single-word spell correction. Returns a vocabulary key the
-    # token is *almost certainly* a typo of, or None.
-    #
-    # We deliberately correct ONLY the classic "swapped two adjacent letters"
-    # typo (e.g. "chaep" -> "cheap", "asai" -> "asia"). We do NOT correct general
-    # single-edit typos, because a one-letter substitution is too easily a
-    # different real word: "short" is one substitution from "sport", "bench" from
-    # "beach", and so on. Restricting to transpositions keeps the corrector
-    # genuinely useful while avoiding those false positives entirely.
-    #
-    # edit_distance() is still provided as a public helper (and exercised by the
-    # tests) — it just is not used to *trigger* a correction here.
-    #
-    # Extra guards: skip short/ambiguous tokens (< 5 chars) and a blocklist of
-    # common English words; require the candidate to be a single word >= 5 chars
-    # that shares the same first and last letter (an interior transposition).
     if len(token) < 5 or token in _SPELLCHECK_BLOCKLIST:
         return None
     for candidate in vocabulary:
@@ -223,25 +98,13 @@ def _spell_correct(token, vocabulary):
         if _one_adjacent_transposition_away(token, candidate):
             return candidate
     return None
-
-
-
-
 def _add_unique(target, value):
     if value not in target:
         target.append(value)
-
-
 def _match_exact_at(raw_tokens, lemma_tokens, start, keyword_map):
-    # Prefer multi-word phrases before single tokens, trying longest match first.
-    # We use space-joined candidates only — the old no-space join (e.g. "to"+"go"
-    # -> "togo") was a workaround for the hand-rolled tokenizer that split on
-    # punctuation. nltk.word_tokenize keeps run-together words as single tokens
-    # ("southamerica" stays "southamerica"), so the no-space join is unnecessary
-    # and actively harmful: it caused "to"+"go" to match the country "Togo".
     max_len = min(5, len(raw_tokens) - start)
     for size in range(max_len, 0, -1):
-        raw_piece   = raw_tokens[start:start + size]
+        raw_piece = raw_tokens[start:start + size]
         lemma_piece = lemma_tokens[start:start + size]
         candidates = [
             " ".join(raw_piece),
@@ -251,139 +114,82 @@ def _match_exact_at(raw_tokens, lemma_tokens, start, keyword_map):
             if key in keyword_map:
                 return key, size
     return None, 0
-
-
 def extract(text, keyword_map, allow_spellcheck=True, blocking_vocabulary=None):
-    # Returns canonical values the user wants to include and avoid:
-    # {"include": [...], "exclude": [...]}. blocking_vocabulary
-    # contains keywords from all other slots; it prevents negation from leaking
-    # across categories, e.g. "not expensive, South America" should not exclude
-    # South America when we are extracting regions.
-    #
-    # allow_spellcheck enables the conservative single-word corrector (see
-    # _spell_correct). The caller turns it OFF for slots whose keywords are short
-    # and collision-prone (duration, country, season) so an unrelated word is
-    # never "corrected" into one of them.
-    #
-    # FIRST clean up informal shorthand ("wanna", "&", "w/o", ...) on the raw
-    # sentence, so the tokenizer and every matcher below see plain English. We do
-    # this here (not in the chatbot) so EVERY call to extract() benefits, no
-    # matter which slot/vocabulary it is run for.
     text = _normalize_common_phrases(text)
-
-    # REWRITE: build tokens using the new nltk-based tokenize() and lemmatize().
-    # We also POS-tag the full token list once so each lemmatize() call gets the
-    # right part-of-speech context — matching the pipeline in the hands-on
-    # notebook (NLP_Hands_on__3_.ipynb sections 1.1, 1.2, 1.5).
-    raw_tokens   = tokenize(text)
-    pos_tags     = nltk.pos_tag(raw_tokens)    # [(token, POS-tag), ...]
+    raw_tokens = tokenize(text)
+    pos_tags = nltk.pos_tag(raw_tokens)
     lemma_tokens = [lemmatize(tok, tag) for tok, tag in pos_tags]
-
-    vocabulary          = set(keyword_map.keys())
+    vocabulary = set(keyword_map.keys())
     blocking_vocabulary = set(blocking_vocabulary or [])
     include = []
     exclude = []
-
-    pending_negate   = False
-    negate_ttl       = 0
+    pending_negate = False
+    negate_ttl = 0
     negated_recently = False
     i = 0
     while i < len(raw_tokens):
-        raw   = raw_tokens[i]
+        raw = raw_tokens[i]
         lemma = lemma_tokens[i]
-
-        # Skip "may" when it is a modal verb (MD tag) rather than the month May.
-        # NLTK reliably tags modal "may" as MD in context ("I may want Europe"),
-        # while calendar "may" in travel-time phrases ("in May") gets NN/NNP.
         if raw == "may" and pos_tags[i][1] == "MD":
             i += 1
             continue
-
         if raw in NEGATION_CONNECTORS and negated_recently:
-            # "not africa or asia" means both values should be excluded.
-            pending_negate   = True
-            negate_ttl       = 3
+            pending_negate = True
+            negate_ttl = 3
             negated_recently = False
             i += 1
             continue
-
         if raw not in NEGATION_CONNECTORS:
             negated_recently = False
-
-        # Stop negation completely if we hit the end of a sentence
         if raw in {".", "!", "?", ";"}:
             pending_negate = False
             negate_ttl = 0
-
         if lemma in NEGATION_WORDS or raw in NEGATION_WORDS:
-            # Before treating this token as a negation trigger, check whether it
-            # STARTS a multi-word phrase in the vocabulary (e.g. "not too hot"
-            # -> mild, "no frills" -> Budget). These phrases must be matched
-            # BEFORE "not"/"no" is consumed as negation, otherwise only the
-            # single-token match fires and the phrase meaning is lost.
             phrase_matched, phrase_consumed = _match_exact_at(raw_tokens, lemma_tokens, i, keyword_map)
             if phrase_matched is not None and phrase_consumed > 1:
                 value = keyword_map[phrase_matched]
                 if pending_negate:
                     _add_unique(exclude, value)
-                    pending_negate   = False
-                    negate_ttl       = 0
+                    pending_negate = False
+                    negate_ttl = 0
                     negated_recently = True
                 else:
                     _add_unique(include, value)
                 i += phrase_consumed
                 continue
-            # No multi-word phrase matched: treat token as a negation trigger.
             pending_negate = True
-            negate_ttl     = 20
+            negate_ttl = 20
             i += 1
             continue
-
         matched, consumed = _match_exact_at(raw_tokens, lemma_tokens, i, keyword_map)
-
-        # SPELL CORRECTION (only if no exact phrase matched here and the caller
-        # allows it for this slot). We try to repair the single raw token, then
-        # its lemma, into a vocabulary keyword. Conservative guards inside
-        # _spell_correct keep this from firing on ordinary words.
         if matched is None and allow_spellcheck:
             corrected = _spell_correct(raw, vocabulary) or _spell_correct(lemma, vocabulary)
             if corrected is not None:
                 matched, consumed = corrected, 1
-
-        # If a pending negation reaches a known keyword that belongs to another
-        # slot, consume the negation there instead of letting it leak forward to
-        # the next keyword in this vocabulary. Example: in region extraction,
-        # "not expensive, South America" sees "expensive" as a blocker, so
-        # South America remains an included region.
         if matched is None and pending_negate and blocking_vocabulary:
             blocked, blocked_consumed = _match_exact_at(
                 raw_tokens, lemma_tokens, i, {k: k for k in blocking_vocabulary}
             )
             if blocked is not None and blocked not in keyword_map:
-                pending_negate   = False
-                negate_ttl       = 0
+                pending_negate = False
+                negate_ttl = 0
                 negated_recently = True
                 i += blocked_consumed
                 continue
-
-
         if matched is not None:
             value = keyword_map[matched]
             if pending_negate:
                 _add_unique(exclude, value)
-                pending_negate   = False
-                negate_ttl       = 0
+                pending_negate = False
+                negate_ttl = 0
                 negated_recently = True
             else:
                 _add_unique(include, value)
             i += consumed
             continue
-
         if pending_negate:
             negate_ttl -= 1
             if negate_ttl <= 0:
                 pending_negate = False
-
         i += 1
-
     return {"include": include, "exclude": exclude}

@@ -1,12 +1,3 @@
-# tests.py
-# ----------------------------------------------------------------------------
-# TEST SUITE for the Travel Destination KBS. Run it with:  python3 tests.py
-# Each check() prints PASS or FAIL. This file is both our development safety net
-# and the "tests that can be performed" the project README must point to. It
-# also doubles as the "experimental design / validation" evidence for the
-# written report: it shows the language understanding, the fuzzy maths, the
-# certainty-factor maths, and the recommender behaviour all do what we claim.
-# ----------------------------------------------------------------------------
 import knowledge_base as kb
 import nlp
 import fuzzy
@@ -15,7 +6,6 @@ PASSED = 0
 FAILED = 0
 FAILS = []
 def check(name, condition):
-    # Record and print the outcome of one assertion.
     global PASSED, FAILED
     if condition:
         PASSED += 1
@@ -25,7 +15,6 @@ def check(name, condition):
         FAILS.append(name)
         print("  [FAIL]", name)
 def approx(a, b, tol=0.02):
-    # Floats are rarely exactly equal, so we compare within a small tolerance.
     return abs(a - b) <= tol
 print("=== 1. KNOWLEDGE BASE: the data loads and is clean ===")
 dests = kb.load_destinations()
@@ -122,8 +111,6 @@ from chatbot import TravelChatbot, render_response_text
 bot = TravelChatbot(dests)
 bot.respond("europe")
 reply = bot.respond("skip all")
-# A successful recommendation is now a structured dict (so the GUI can render
-# cards); error/empty replies remain plain strings.
 check("'skip all' produces recommendations", isinstance(reply, dict) and reply.get("type") == "recommendations")
 check("'skip all' recommendation has 5 result cards", isinstance(reply, dict) and len(reply["results"]) == 5)
 check("recommendation text renders the picks header for the CLI", "Here are a few destinations" in render_response_text(reply))
@@ -131,7 +118,6 @@ check("country vocab: 'japan' -> Japan (country slot)", nlp.extract("i want to v
 check("country_to_region: Japan -> asia", kb.country_to_region("Japan") == "asia")
 check("'japan' is NOT in the continent vocab anymore", nlp.extract("i want to visit japan", kb.CONTINENT_SYNONYMS)["include"] == [])
 check("expanded vocab: 'temples' lemmatised -> culture", "culture" in nlp.extract("i love ancient temples", kb.LIFESTYLE_SYNONYMS)["include"])
-
 print("=== 9. PATCH VALIDATION: safer NLP, exclusions, gates ===")
 check("NLP: cheap does not become warm", nlp.extract("cheap", kb.CLIMATE_SYNONYMS)["include"] == [])
 check("NLP: mild does not become Mid-range", nlp.extract("mild", kb.BUDGET_SYNONYMS)["include"] == [])
@@ -153,7 +139,6 @@ check("NLP: united states phrase maps correctly", nlp.extract("united states", k
 check("NLP: middle east phrase maps correctly", nlp.extract("middle east", kb.CONTINENT_SYNONYMS)["include"] == ["middle_east"])
 rneg = nlp.extract("not africa or asia", kb.CONTINENT_SYNONYMS)
 check("NLP: not Africa or Asia excludes both", set(rneg["exclude"]) == {"africa", "asia"} and rneg["include"] == [])
-
 bot_empty = TravelChatbot(dests)
 empty_reply = bot_empty.respond("go")
 check("chatbot: empty go asks for a preference", "at least one preference" in empty_reply)
@@ -162,7 +147,6 @@ bot_ex.greeting()
 bot_ex.respond("not expensive and avoid nightlife")
 check("chatbot: not expensive creates budget exclusion", bot_ex.query["budget_exclude"] == ["Luxury"])
 check("chatbot: avoid nightlife creates lifestyle exclusion", bot_ex.query["lifestyle_exclude"] == ["nightlife"])
-
 luxury_city = next(d for d in dests if d["budget_level"] == "Luxury")
 excluded_budget_score = inf.score_destination(luxury_city, {"budget_exclude": ["Luxury"]})
 check("inference: excluded Luxury produces negative evidence", excluded_budget_score["details"]["budget_exclude"][1] < 0)
@@ -176,8 +160,6 @@ gated = inf.score_destination(lviv, {"climate": ["warm"], "budget": ["Budget"], 
 check("inference: hard zero climate match is confidence gated", gated["confidence"] <= 0.35 and "climate" in gated["hard_failures"])
 conflict_out = inf.recommend(dests, {"budget": ["Budget", "Luxury"]}, top_n=10)
 check("inference: Budget + Luxury conflict actually prefers Mid-range", all(d["budget_level"] == "Mid-range" for _, d, _ in conflict_out["results"]))
-
-# Extra regression checks after manual review: negation must not leak across unrelated slots.
 bot_leak = TravelChatbot(dests)
 bot_leak.greeting()
 bot_leak.respond("not expensive avoid nightlife south america short trip")
@@ -185,21 +167,15 @@ check("chatbot: not expensive does not exclude South America", bot_leak.query["r
 check("chatbot: avoid nightlife does not exclude Short trip", bot_leak.query["duration"] == ["Short trip"] and bot_leak.query["duration_exclude"] == [])
 check("chatbot: not expensive still excludes Luxury", bot_leak.query["budget_exclude"] == ["Luxury"])
 check("chatbot: avoid nightlife still excludes nightlife", bot_leak.query["lifestyle_exclude"] == ["nightlife"])
-
 bot_typo = TravelChatbot(dests)
 bot_typo.greeting()
 bot_typo.respond("chaep asia cuisine")
 check("chatbot: all-in-one typo chaep still fills Budget", bot_typo.query["budget"] == ["Budget"])
-
 print("=== 10. REVIEW FIXES: spell guard, union, sanitize, NLTK setup, explanation ===")
-# edit_distance is a real helper (used by the conservative corrector).
 check("edit_distance is callable and correct", nlp.edit_distance("flaw", "lawn") == 2)
-# The corrector fixes a transposition typo but NOT a one-letter substitution,
-# so common words never get rewritten into lookalike keywords.
 check("spell guard: transposition 'chaep' -> Budget", nlp.extract("chaep", kb.BUDGET_SYNONYMS)["include"] == ["Budget"])
 check("spell guard: 'short' is NOT corrected to 'sport'/adventure", nlp.extract("short", kb.LIFESTYLE_SYNONYMS)["include"] == [])
 check("spell guard: 'cheap' is NOT corrected to 'crisp'/cold", nlp.extract("cheap", kb.CLIMATE_SYNONYMS)["include"] == [])
-# Country + region given together = UNION, not country silently overriding region.
 union_q = {"countries_include": ["Japan"], "regions_include": ["europe"], "lifestyle": {"culture": 5}}
 union_out = inf.recommend(dests, union_q, top_n=560)
 union_regions = {d["region"] for _, d, _ in union_out["results"]}
@@ -207,26 +183,19 @@ union_countries = {d["country"] for _, d, _ in union_out["results"]}
 check("union: Japanese cities are kept", "Japan" in union_countries)
 check("union: European cities are kept too", "europe" in union_regions)
 check("union: nothing outside Japan-or-Europe leaks in", all((d["country"] == "Japan" or d["region"] == "europe") for _, d, _ in union_out["results"]))
-# Sanitize: if the user jumps to results mid-rating, a -1 placeholder (a dim
-# picked but not yet rated) must NOT reach the cosine vector, where it would be
-# an invalid negative weight. _format_recommendation() must clean it up first.
 bot_san = TravelChatbot(dests)
 bot_san.query["regions_include"] = ["europe"]
-bot_san.query["lifestyle"] = {"culture": -1, "nature": -1}   # picked, unrated
+bot_san.query["lifestyle"] = {"culture": -1, "nature": -1}
 san_reply = bot_san._format_recommendation()
 check("sanitize: no -1 placeholder survives into the query", all(w != -1 for w in bot_san.query["lifestyle"].values()))
 check("sanitize: unrated picked dims default to a valid 1-5 weight", all(1 <= w <= 5 for w in bot_san.query["lifestyle"].values()))
 check("sanitize: results still produced after jumping mid-rating", isinstance(san_reply, dict) and san_reply.get("type") == "recommendations")
-# NLTK data setup helper exists and runs cleanly (data already present here).
 check("ensure_nltk_data() runs without raising", (nlp.ensure_nltk_data() or True))
-# Explanation facility returns a readable, transparent justification string.
 some_dest = next(d for d in dests if d["region"] == "europe")
 exp_score = inf.score_destination(some_dest, {"climate": ["warm"], "budget": ["Mid-range"]})
 exp_text = inf.explain(some_dest, exp_score, {"climate": ["warm"], "budget": ["Mid-range"]})
 check("explanation: explain() returns a confidence string", isinstance(exp_text, str) and "confidence" in exp_text)
 check("explanation: explain_human() returns plain-English bullets", isinstance(inf.explain_human(some_dest, exp_score, {"climate": ["warm"]}), list))
-# Conversational lifestyle: free text (not just the numbered menu) populates the
-# interest vector, while a non-lifestyle answer adds nothing.
 bot_free = TravelChatbot(dests)
 bot_free.greeting()
 bot_free.respond("europe, i love food and culture")
@@ -236,9 +205,7 @@ bot_free2 = TravelChatbot(dests)
 bot_free2.greeting()
 bot_free2.respond("somewhere in europe")
 check("free-text lifestyle: a non-lifestyle answer adds no interests", bot_free2.query["lifestyle"] == {})
-
 print("=== 11. CUSTOMER-FACING OUTPUT: no technical maths, >= 15 distinct responses ===")
-# The end user must never see certainty factors or raw membership numbers.
 import random as _rnd
 _rnd.seed(0)
 bot_disp = TravelChatbot(dests)
@@ -253,43 +220,38 @@ check("recommendation text hides certainty factors", "(cf " not in rec_text and 
 check("recommendation text hides raw membership numbers", "m=" not in rec_text)
 check("'why' explanation hides certainty factors", "cf=" not in why_text and "(cf " not in why_text and "m=" not in why_text)
 check("'why' still gives a real reason", len(why_text) > 30 and "why" in why_text.lower())
-
-# At least 15 DIFFERENT responses (course requirement). We collect the distinct
-# replies the bot can produce across its intents and conversational situations.
 responses = set()
 def _add(r):
     t = render_response_text(r)
     if isinstance(t, str) and t.strip():
         responses.add(t.strip())
 b0 = TravelChatbot(dests)
-_add(b0.greeting())                 # 1 greeting
-_add(b0.help_text())                # 2 help
-_add(b0.respond(""))                # 3 empty-input nudge
-_add(b0.respond("askjdhfg"))        # 4 confused reply
-_add(b0.respond("hi"))              # 5 small talk: greeting
-_add(b0.respond("thanks"))          # 6 small talk: thanks
-_add(b0.respond("europe"))          # 7 acknowledgement + next question
-_add(b0.respond("skip"))            # 8 skip acknowledgement
-_add(b0.respond("why"))             # 9 "no recommendations yet"
+_add(b0.greeting())
+_add(b0.help_text())
+_add(b0.respond(""))
+_add(b0.respond("askjdhfg"))
+_add(b0.respond("hi"))
+_add(b0.respond("thanks"))
+_add(b0.respond("europe"))
+_add(b0.respond("skip"))
+_add(b0.respond("why"))
 b1 = TravelChatbot(dests); b1.greeting()
-_add(b1.respond("go"))              # 10 empty-query preference prompt
+_add(b1.respond("go"))
 b2 = TravelChatbot(dests); b2.greeting()
-_add(b2.respond("warm cheap week in asia, i love culture"))  # 11 ack of preferences
-_add(b2.respond("skip all"))        # 12 recommendations (cards)
-_add(b2.respond("why"))             # 13 plain-English why
-_add(b2.respond("not the first one"))  # 14 reject-city update
-_add(b2.respond("restart"))         # 15 restart
-_add(b2.respond("exit"))            # 16 exit
+_add(b2.respond("warm cheap week in asia, i love culture"))
+_add(b2.respond("skip all"))
+_add(b2.respond("why"))
+_add(b2.respond("not the first one"))
+_add(b2.respond("restart"))
+_add(b2.respond("exit"))
 b3 = TravelChatbot(dests); b3.greeting()
-_add(b3.respond("not africa or asia, luxury, cold, day trip, beaches and nightlife and seclusion"))  # advisories/tensions
+_add(b3.respond("not africa or asia, luxury, cold, day trip, beaches and nightlife and seclusion"))
 b4 = TravelChatbot(dests); b4.greeting()
-_add(b4.respond("tell me about Athens"))     # city data profile
-_add(b4.respond("more like Athens"))         # data-driven look-alikes
+_add(b4.respond("tell me about Athens"))
+_add(b4.respond("more like Athens"))
 check("chatbot produces at least 15 DISTINCT responses", len(responses) >= 15)
 print("    (distinct responses collected: " + str(len(responses)) + ")")
-
 print("=== 12. DATA-DRIVEN RESPONSES: city profile, more-like, best-time, summary ===")
-# Knowledge-base data helpers read columns we already have.
 ath = next(d for d in dests if d["city"] == "Athens")
 wm = kb.warmest_month(ath["avg_temp_monthly"]); cm = kb.coldest_month(ath["avg_temp_monthly"])
 check("kb.warmest_month returns the hottest month", wm is not None and wm[1] >= cm[1])
@@ -300,18 +262,15 @@ syd = next((d for d in dests if d["city"] == "Sydney"), None)
 if syd is not None:
     check("kb.hemisphere: Sydney is southern", kb.hemisphere(syd["latitude"]) == "southern")
 check("kb.hemisphere: Athens is northern", kb.hemisphere(ath["latitude"]) == "northern")
-# "tell me about <city>" -> a data profile (no certainty factors).
 bot_city = TravelChatbot(dests)
 bot_city.greeting()
 prof = bot_city.respond("tell me about Athens")
 check("describe_city: returns a profile mentioning the city", isinstance(prof, str) and "Athens" in prof and "Climate:" in prof)
 check("describe_city: profile hides technical maths", "cf" not in prof.lower().replace("pacific", "") and "m=" not in prof)
-# A plain preference that happens to name a city is NOT hijacked by describe.
 bot_city2 = TravelChatbot(dests)
 bot_city2.greeting()
 bot_city2.respond("i want to visit Tokyo")
 check("describe_city: a plain 'visit Tokyo' is still a preference, not a profile", bot_city2.query["countries_include"] == ["Japan"])
-# "more like <city>" -> recommendations cloning that city's vibe.
 bot_like = TravelChatbot(dests)
 bot_like.greeting()
 like_reply = bot_like.respond("somewhere more like Athens")
@@ -319,28 +278,23 @@ check("more_like: clones the city's budget into the query", bot_like.query["budg
 check("more_like: clones the city's climate into the query", bot_like.query["climate"] == [ath["climate"]])
 check("more_like: produces recommendations", isinstance(like_reply, dict) and like_reply.get("type") == "recommendations")
 check("more_like: does not recommend the seed city back", all(c["city"] != "Athens" for c in like_reply["results"]))
-# Data summary line is present and reports the pool size.
 bot_sum = TravelChatbot(dests)
 bot_sum.greeting()
 bot_sum.respond("europe, warm, i love culture")
 sum_reply = bot_sum.respond("skip all")
 check("recommendations carry a data summary line", isinstance(sum_reply, dict) and "compared" in sum_reply.get("summary", ""))
 check("data summary appears in the CLI text", "compared" in render_response_text(sum_reply))
-
 print("=== 13. GUIDED REFINE: profile -> 'yes'/tweak -> tailored recommendations ===")
 lis = next(d for d in dests if d["city"] == "Lisbon")
-# After a city profile the bot remembers the city and invites a yes/tweak answer.
 bot_g = TravelChatbot(dests)
 bot_g.greeting()
 prof = bot_g.respond("tell me about Lisbon")
 check("profile asks a follow-up and remembers the city", bot_g._suggested_city is not None and bot_g._suggested_city["city"] == "Lisbon")
 check("profile invites a yes/tweak answer", "say \"yes\"" in prof or "just say" in prof)
-# "yes" -> similar places, seed city not recommended back, flag cleared.
 yes_reply = bot_g.respond("yes")
 check("'yes' after a profile yields recommendations", isinstance(yes_reply, dict) and yes_reply.get("type") == "recommendations")
 check("'yes' clones the city's vibe (mild + Mid-range)", bot_g.query["climate"] == [lis["climate"]] and bot_g.query["budget"] == [lis["budget_level"]])
 check("the suggested-city flag is cleared after acting", bot_g._suggested_city is None)
-# Tweaks: "warmer and cheaper, more beaches" override the cloned template.
 bot_t = TravelChatbot(dests)
 bot_t.greeting()
 bot_t.respond("tell me about Lisbon")
@@ -350,49 +304,40 @@ check("tweak overrides budget to Budget (cheaper)", bot_t.query["budget"] == ["B
 check("tweak boosts the named interest (beaches -> 5)", bot_t.query["lifestyle"].get("beaches") == 5)
 check("tweak still produces recommendations", isinstance(tw_reply, dict) and tw_reply.get("type") == "recommendations")
 check("tweaked picks are actually warm", all(c["dest"]["climate"] == "warm" for c in tw_reply["results"]))
-# Decline steps back without recommending.
 bot_n = TravelChatbot(dests)
 bot_n.greeting()
 bot_n.respond("tell me about Lisbon")
 no_reply = bot_n.respond("no")
 check("'no' after a profile steps back politely", isinstance(no_reply, str) and "No problem" in no_reply and bot_n._suggested_city is None)
-# Comparative climate words resolve.
 check("vocab: 'warmer' -> warm", nlp.extract("somewhere warmer", kb.CLIMATE_SYNONYMS)["include"] == ["warm"])
 check("vocab: 'cooler' -> cold", nlp.extract("a bit cooler", kb.CLIMATE_SYNONYMS)["include"] == ["cold"])
 check("vocab: 'pricier' -> Luxury", nlp.extract("something pricier", kb.BUDGET_SYNONYMS)["include"] == ["Luxury"])
-
 print("=== 14. PER-USER IMPORTANCE: priorities scale the certainty factors ===")
-# Default: no stated priority -> behaves exactly like the fixed base weights.
 city = next(d for d in dests if d["city"] == "Athens")
 q_base = {"climate": ["warm"], "budget": ["Budget"], "lifestyle": {"culture": 5}}
 base_conf = inf.score_destination(city, q_base)["confidence"]
 check("importance default ({}) leaves scoring unchanged", inf.score_destination(city, dict(q_base, importance={}))["confidence"] == base_conf)
-# Athens is only weakly 'warm' (penalty). Caring MORE about climate must lower the
-# score; caring LESS must raise it.
 hi = inf.score_destination(city, dict(q_base, importance={"climate": 1.3}))["confidence"]
 lo = inf.score_destination(city, dict(q_base, importance={"climate": 0.6}))["confidence"]
 check("raising climate importance amplifies its (negative) effect", hi < base_conf)
 check("lowering climate importance softens its effect", lo > base_conf)
-# Effective rule CF stays clamped to a sane range even with a big multiplier.
 big = inf.score_destination(city, dict(q_base, importance={"lifestyle": 5.0}))
 check("importance is clamped (no CF blows past 0.97)", all(-0.97 <= cf <= 0.97 for _, (m, cf) in big["details"].items()))
-# The chatbot detects a stated priority and attaches it to the RIGHT criterion.
 def imp_of(msg):
     b = TravelChatbot(dests); b.greeting(); b.respond(msg)
     return b.query["importance"]
+def life_of(msg):
+    b = TravelChatbot(dests); b.greeting(); b.respond(msg)
+    return b.query["lifestyle"]
 check("detect: 'budget is the most important' -> budget up", imp_of("warm, cheap, i love culture, but budget is the most important").get("budget") == 1.3)
 check("detect: 'warm weather is a must' -> climate up", imp_of("i want it cheap, warm weather is a must").get("climate") == 1.3)
 check("detect: 'dont care about the weather' -> climate down", imp_of("europe, i love nature, i dont really care about the weather").get("climate") == 0.6)
-check("detect: 'culture matters most' -> lifestyle up", imp_of("culture matters most to me").get("lifestyle") == 1.3)
+check("detect: 'culture matters most' -> culture weight 5 (per-dim)", life_of("culture matters most to me").get("culture") == 5)
 check("detect: a normal sentence sets no priority", imp_of("a warm cheap week in asia") == {})
-# The acknowledgement confirms the weighting back to the user.
 b_imp = TravelChatbot(dests); b_imp.greeting()
 ack_imp = b_imp.respond("cheap, warm, but budget matters most")
 check("acknowledgement confirms the weighting", "weight" in ack_imp and "budget" in ack_imp)
-
 print("=== 15. NEW FEATURE TESTS (fixes from review checklist) ===")
-
-# --- Fix 1: Contraction negation (n't) ---
 r_dont_asia = nlp.extract("I don't want Asia", kb.CONTINENT_SYNONYMS)
 check("contraction: \"I don't want Asia\" excludes asia", "asia" in r_dont_asia["exclude"] and "asia" not in r_dont_asia["include"])
 r_dont_night = nlp.extract("I don't want nightlife", kb.LIFESTYLE_SYNONYMS)
@@ -403,8 +348,6 @@ check("chatbot: \"I don't want Asia\" -> regions_exclude contains asia", "asia" 
 bot_dont2 = TravelChatbot(dests); bot_dont2.greeting()
 bot_dont2.respond("I don't want nightlife")
 check("chatbot: \"I don't want nightlife\" -> lifestyle_exclude contains nightlife", "nightlife" in bot_dont2.query["lifestyle_exclude"])
-
-# --- Fix 2: Country negation leak ---
 r_nexp_jp = nlp.extract("not expensive Japan", kb.COUNTRY_SYNONYMS,
                          blocking_vocabulary=set(kb.BUDGET_SYNONYMS.keys()))
 check("NLP: \"not expensive Japan\" -> Japan included (budget blocks negation)", "Japan" in r_nexp_jp["include"] and "Japan" not in r_nexp_jp["exclude"])
@@ -420,8 +363,6 @@ bot_anjp.respond("avoid nightlife Japan")
 check("chatbot: \"avoid nightlife Japan\" -> Japan in countries_include", "Japan" in bot_anjp.query["countries_include"])
 check("chatbot: \"avoid nightlife Japan\" -> nightlife in lifestyle_exclude", "nightlife" in bot_anjp.query["lifestyle_exclude"])
 check("chatbot: \"avoid nightlife Japan\" -> Japan NOT in countries_exclude", "Japan" not in bot_anjp.query["countries_exclude"])
-
-# --- Fix 3: Lifestyle "all" selection ---
 from chatbot import _parse_lifestyle_selection
 check("lifestyle: \"all\" selects all 9 dimensions", len(_parse_lifestyle_selection("all")) == 9)
 check("lifestyle: \"everything\" selects all 9 dimensions", len(_parse_lifestyle_selection("everything")) == 9)
@@ -430,8 +371,6 @@ bot_all = TravelChatbot(dests); bot_all.greeting()
 bot_all.pending_slot = "lifestyle_pick"
 bot_all._update_slots("all")
 check("chatbot: typing \"all\" during lifestyle_pick fills all 9 dims", len(bot_all.query["lifestyle"]) == 9)
-
-# --- Fix 4: Importance detector ---
 def imp_of2(msg):
     b = TravelChatbot(dests); b.greeting(); b.respond(msg)
     return b.query["importance"]
@@ -439,20 +378,16 @@ check("importance: \"budget is not important but climate matters most\" -> budge
 check("importance: \"budget is not important but climate matters most\" -> climate up", imp_of2("budget is not important but climate matters most").get("climate") == 1.3)
 check("importance: \"budget matters most and climate matters most\" -> budget up", imp_of2("budget matters most and climate matters most").get("budget") == 1.3)
 check("importance: \"budget matters most and climate matters most\" -> climate up", imp_of2("budget matters most and climate matters most").get("climate") == 1.3)
-check("importance: \"beaches are a must\" -> lifestyle up (are a must cue)", imp_of2("beaches are a must").get("lifestyle") == 1.3)
-
-# --- Fix 5: Weighted lifestyle strength ---
+check("importance: \"beaches are a must\" -> beaches weight 5 (per-dim, are-a-must cue)", life_of("beaches are a must").get("beaches") == 5)
 city_high = {k: 1 for k in kb.LIFESTYLE_DIMENSIONS}
 city_high["culture"] = 5; city_high["cuisine"] = 5
-city_low  = {k: 1 for k in kb.LIFESTYLE_DIMENSIONS}
+city_low = {k: 1 for k in kb.LIFESTYLE_DIMENSIONS}
 city_low["culture"] = 1; city_low["cuisine"] = 1
 q_life = {"lifestyle": {"culture": 5, "cuisine": 5}}
 score_high = inf.score_destination(city_high, q_life)["confidence"]
-score_low  = inf.score_destination(city_low,  q_life)["confidence"]
+score_low = inf.score_destination(city_low, q_life)["confidence"]
 check("weighted lifestyle: high-scoring city outranks low-scoring city", score_high > score_low)
 check("weighted lifestyle: low-scoring city is penalised (<0)", score_low < 0)
-
-# --- Fix 6: Country plus region logic ---
 bot_japan_asia = TravelChatbot(dests); bot_japan_asia.greeting()
 bot_japan_asia.respond("Japan in Asia")
 check("country+region: \"Japan in Asia\" -> Japan in countries_include", "Japan" in bot_japan_asia.query["countries_include"])
@@ -461,23 +396,17 @@ bot_japan_or_eu = TravelChatbot(dests); bot_japan_or_eu.greeting()
 bot_japan_or_eu.respond("Japan or Europe")
 check("country+region: \"Japan or Europe\" -> Japan in countries_include", "Japan" in bot_japan_or_eu.query["countries_include"])
 check("country+region: \"Japan or Europe\" -> europe in regions_include (explicit or)", "europe" in bot_japan_or_eu.query["regions_include"])
-
-# --- Fix 7: Summary mentions both countries and regions ---
 bot_sum2 = TravelChatbot(dests); bot_sum2.greeting()
 bot_sum2.respond("Japan or Europe")
 sum_reply2 = bot_sum2.respond("skip all")
 check("summary: mentions Japan when Japan+Europe active", isinstance(sum_reply2, dict) and "Japan" in sum_reply2.get("summary", ""))
 check("summary: mentions Europe when Japan+Europe active", isinstance(sum_reply2, dict) and "Europe" in sum_reply2.get("summary", ""))
-
-# --- Fix 8: Multiword phrases starting with negation ---
 r_nothot = nlp.extract("not too hot", kb.CLIMATE_SYNONYMS)
 check("NLP: \"not too hot\" -> mild (multiword phrase before negation fires)", r_nothot["include"] == ["mild"] and r_nothot["exclude"] == [])
 r_nofrills = nlp.extract("no frills", kb.BUDGET_SYNONYMS)
 check("NLP: \"no frills\" -> Budget (multiword phrase before negation fires)", r_nofrills["include"] == ["Budget"] and r_nofrills["exclude"] == [])
 r_notcold = nlp.extract("not too cold", kb.CLIMATE_SYNONYMS)
 check("NLP: \"not too cold\" -> mild", r_notcold["include"] == ["mild"] and r_notcold["exclude"] == [])
-
-# --- Fix 9: Season words do not auto-infer climate ---
 r_summer_clim = nlp.extract("summer in Japan", kb.CLIMATE_SYNONYMS)
 check("NLP: \"summer in Japan\" does NOT set warm climate (season word only sets months)", r_summer_clim["include"] == [])
 r_winter_clim = nlp.extract("I want to travel in winter", kb.CLIMATE_SYNONYMS)
@@ -487,8 +416,6 @@ bot_sumjp.respond("summer in Japan")
 check("chatbot: \"summer in Japan\" sets travel months [6,7,8]", set(bot_sumjp.query["travel_months"]) == {6, 7, 8})
 check("chatbot: \"summer in Japan\" does NOT set climate", bot_sumjp.query["climate"] == [])
 check("chatbot: \"summer in Japan\" sets Japan in countries_include", "Japan" in bot_sumjp.query["countries_include"])
-
-# --- Fix 10: May as month vs modal ---
 r_may_modal = nlp.extract("I may want Europe", kb.SEASON_SYNONYMS,
                            allow_spellcheck=False)
 check("NLP: \"I may want Europe\" does NOT extract May as travel month", r_may_modal["include"] == [])
@@ -496,25 +423,18 @@ bot_may = TravelChatbot(dests); bot_may.greeting()
 bot_may.respond("I may want Europe")
 check("chatbot: \"I may want Europe\" -> no May in travel_months", 5 not in bot_may.query["travel_months"])
 check("chatbot: \"I may want Europe\" -> europe in regions_include", "europe" in bot_may.query["regions_include"])
-
-# --- Fix 12: Why explanations use recommendation snapshot ---
 bot_snap = TravelChatbot(dests); bot_snap.greeting()
 bot_snap.respond("warm cheap asia culture")
 snap_rec = bot_snap.respond("skip all")
-# Change query AFTER recommendation to simulate user refinement
 bot_snap.query["climate"] = ["cold"]
 why_snap = bot_snap.respond("why")
 check("why: explanation uses recommendation snapshot not current query", "warm" in why_snap.lower() or "climate" in why_snap.lower())
 check("why: snapshot is stored in last_results", "query" in bot_snap.last_results)
-
-# --- Fix 13: more_like preserves duration ---
 ath2 = next(d for d in dests if d["city"] == "Athens")
 bot_ml = TravelChatbot(dests); bot_ml.greeting()
 bot_ml.respond("I want a one week trip")
 bot_ml._more_like(ath2, "")
 check("more_like: preserves duration from earlier in conversation", bot_ml.query["duration"] == ["One week"])
-
-# --- Fix 14: Exclusion policy — avoid nightlife ---
 night_city2 = {k: 3 for k in kb.LIFESTYLE_DIMENSIONS}; night_city2["nightlife"] = 5
 quiet_city2 = {k: 3 for k in kb.LIFESTYLE_DIMENSIONS}; quiet_city2["nightlife"] = 1
 score_night = inf.score_destination(night_city2, {"lifestyle_exclude": ["nightlife"]})
@@ -522,27 +442,141 @@ score_quiet = inf.score_destination(quiet_city2, {"lifestyle_exclude": ["nightli
 check("avoid nightlife: high-nightlife city is penalised more than low-nightlife", score_night["confidence"] < score_quiet["confidence"])
 out_avoid = inf.recommend(dests, {"lifestyle_exclude": ["nightlife"], "lifestyle": {"culture": 5}}, top_n=5)
 check("avoid nightlife: recommendation still produced with exclusion", len(out_avoid["results"]) > 0)
-
-# --- Fix 15: New forward chaining rules ---
 from inference import build_working_memory, forward_chain
 import rules as _rules
 q_nl_urban = {"lifestyle": {"urban": 5}, "lifestyle_exclude": ["nightlife"]}
 facts_nl_urban = build_working_memory(q_nl_urban)
 _, fired_nl, _ = forward_chain(facts_nl_urban, _rules.ADVISORY_RULES)
 check("forward chain: nightlife_urban_avoided fires when avoids:nightlife + wants:urban", "nightlife_urban_avoided" in fired_nl)
-
 q_winter_beach = {"travel_months": [12, 1, 2], "lifestyle": {"beaches": 5}}
 facts_wb = build_working_memory(q_winter_beach)
 _, fired_wb, _ = forward_chain(facts_wb, _rules.ADVISORY_RULES)
 check("forward chain: winter_beaches fires when travel:winter + wants:beaches", "winter_beaches" in fired_wb)
-
-# --- Fix 16 integration: avoid nightlife but I like urban culture ---
 bot_avu = TravelChatbot(dests); bot_avu.greeting()
 bot_avu.respond("avoid nightlife but I like urban culture")
 check("chatbot: \"avoid nightlife but I like urban culture\" -> nightlife excluded", "nightlife" in bot_avu.query["lifestyle_exclude"])
 check("chatbot: \"avoid nightlife but I like urban culture\" -> urban included", "urban" in bot_avu.query["lifestyle"])
 check("chatbot: \"avoid nightlife but I like urban culture\" -> culture included", "culture" in bot_avu.query["lifestyle"])
-
+print("=== 17. DE-EMPHASIS vs EXCLUSION (don't care != don't want) ===")
+def q_of(msg):
+    b = TravelChatbot(dests); b.greeting(); b.respond(msg); return b.query
+q1 = q_of("I don't care about budget")
+check("1: 'dont care about budget' -> budget importance down", q1["importance"].get("budget") == 0.6)
+check("1: 'dont care about budget' -> no Budget include", q1["budget"] == [])
+check("1: 'dont care about budget' -> no Budget exclude", q1["budget_exclude"] == [])
+q2 = q_of("budget is not important")
+check("2: 'budget is not important' -> importance down, no include/exclude", q2["importance"].get("budget") == 0.6 and q2["budget"] == [] and q2["budget_exclude"] == [])
+q3 = q_of("budget matters most")
+check("3: 'budget matters most' -> importance up", q3["importance"].get("budget") == 1.3)
+check("3: 'budget matters most' -> no Budget include", q3["budget"] == [])
+check("3: but 'on a budget' DOES include Budget", q_of("i am on a budget")["budget"] == ["Budget"])
+q4 = q_of("budget doesn't matter, I want luxury")
+check("4: 'budget doesnt matter, want luxury' -> budget importance down", q4["importance"].get("budget") == 0.6)
+check("4: 'budget doesnt matter, want luxury' -> Luxury included", q4["budget"] == ["Luxury"])
+check("4: 'budget doesnt matter, want luxury' -> no Budget include/exclude", "Budget" not in q4["budget"] and q4["budget_exclude"] == [])
+q5 = q_of("nightlife is not important")
+check("5: 'nightlife is not important' -> not a high-weight want", q5["lifestyle"].get("nightlife", 0) <= 1)
+check("5: 'nightlife is not important' -> NOT excluded", "nightlife" not in q5["lifestyle_exclude"])
+q6 = q_of("I don't care about food but culture matters most")
+check("6: cuisine NOT excluded", "cuisine" not in q6["lifestyle_exclude"])
+check("6: cuisine not a high want", q6["lifestyle"].get("cuisine", 0) <= 1)
+check("6: culture is a top want (5)", q6["lifestyle"].get("culture") == 5)
+q7 = q_of("food is not important but culture matters most")
+check("7: cuisine low/ignored", q7["lifestyle"].get("cuisine", 0) <= 1 and "cuisine" not in q7["lifestyle_exclude"])
+check("7: culture NOT excluded and high", "culture" not in q7["lifestyle_exclude"] and q7["lifestyle"].get("culture") == 5)
+check("8: 'I dont want nightlife' -> nightlife excluded", "nightlife" in q_of("I don't want nightlife")["lifestyle_exclude"])
+check("9: 'avoid nightlife' -> nightlife excluded", "nightlife" in q_of("avoid nightlife")["lifestyle_exclude"])
+check("10: 'no luxury' -> Luxury excluded", "Luxury" in q_of("no luxury")["budget_exclude"])
+check("11: 'no frills' -> Budget included", "Budget" in q_of("no frills")["budget"])
+check("12: 'not too hot' -> mild included", "mild" in q_of("not too hot")["climate"])
+ack_dc = TravelChatbot(dests); ack_dc.greeting()
+ack_text_dc = ack_dc.respond("I don't care about budget")
+check("no contradictory 'nothing on a budget' acknowledgement", "nothing" not in ack_text_dc.lower())
+print("=== 18. NLP de-emphasis at the extractor level + POS smoke ===")
+check("NLP: 'avoid nightlife' still excludes at extractor level", "nightlife" in nlp.extract("avoid nightlife", kb.LIFESTYLE_SYNONYMS)["exclude"])
+check("NLP: 'without beaches' excludes beaches", "beaches" in nlp.extract("without beaches", kb.LIFESTYLE_SYNONYMS)["exclude"])
+check("NLP: 'no frills' -> Budget (negation-starting phrase preserved)", nlp.extract("no frills", kb.BUDGET_SYNONYMS)["include"] == ["Budget"])
+check("NLP: 'not too cold' -> mild", "mild" in nlp.extract("not too cold", kb.CLIMATE_SYNONYMS)["include"])
+import nltk as _nltk
+_tags = _nltk.pos_tag(["warm", "weather"])
+check("NLTK pos_tag works (tagger data present)", isinstance(_tags, list) and len(_tags) == 2 and len(_tags[0]) == 2)
+print("=== 19. PRESERVED BEHAVIOUR (existing fixes still intact) ===")
+u = inf.recommend(dests, q_of("Japan or Europe"), top_n=560)
+ucty = {d["country"] for _, d, _ in u["results"]}; ureg = {d["region"] for _, d, _ in u["results"]}
+check("'Japan or Europe' -> union (Japan + europe present)", "Japan" in ucty and "europe" in ureg)
+qja = q_of("Japan in Asia")
+check("'Japan in Asia' -> Japan only (region not added as separate filter)", qja["countries_include"] == ["Japan"] and qja["regions_include"] == [])
+qsum = q_of("summer in Japan")
+check("'summer in Japan' -> travel months set", qsum["travel_months"] != [])
+check("'summer in Japan' -> climate NOT auto-set to warm", qsum["climate"] == [])
+check("'I may want Europe' -> May is NOT a travel month", q_of("I may want Europe")["travel_months"] == [])
+check("'all' still selects all 9 lifestyle dimensions", len(_parse_lifestyle_selection("all")) == 9)
+bot_mlc = TravelChatbot(dests); bot_mlc.greeting()
+bot_mlc.respond("tell me about Lisbon")
+bot_mlc.respond("more like Lisbon but for one week in July")
+check("more_like: explicit duration in tweak preserved (One week)", bot_mlc.query["duration"] == ["One week"])
+check("more_like: explicit month in tweak preserved (July=7)", bot_mlc.query["travel_months"] == [7])
+bot_mlc2 = TravelChatbot(dests); bot_mlc2.greeting()
+bot_mlc2.respond("i want to travel in december")
+bot_mlc2.respond("more like Lisbon")
+check("more_like: month set earlier in conversation is preserved", 12 in bot_mlc2.query["travel_months"])
+print("=== 20. APOSTROPHE-FREE de-emphasis + lifestyle acknowledgement ===")
+qa1 = q_of("budget doesnt matter, I want luxury")
+check("apostrophe-free: 'budget doesnt matter' -> budget importance down", qa1["importance"].get("budget") == 0.6)
+check("apostrophe-free: 'budget doesnt matter, want luxury' -> Luxury included", qa1["budget"] == ["Luxury"])
+check("apostrophe-free: no Budget include/exclude", "Budget" not in qa1["budget"] and qa1["budget_exclude"] == [])
+qa2 = q_of("food doesnt matter but culture matters most")
+check("apostrophe-free: 'food doesnt matter' -> cuisine low (<=1)", qa2["lifestyle"].get("cuisine", 0) <= 1)
+check("apostrophe-free: '... culture matters most' -> culture 5", qa2["lifestyle"].get("culture") == 5)
+check("apostrophe-free: cuisine NOT excluded", "cuisine" not in qa2["lifestyle_exclude"])
+check("apostrophe-free: 'climate doesnt matter' -> climate importance down", q_of("climate doesnt matter")["importance"].get("climate") == 0.6)
+check("apostrophe-free: 'weather doesnt matter' -> climate importance down", q_of("weather doesnt matter")["importance"].get("climate") == 0.6)
+check("apostrophe-free: 'dont matter' variant works", q_of("the budget dont matter")["importance"].get("budget") == 0.6)
+b_ackn = TravelChatbot(dests); b_ackn.greeting()
+ackn = b_ackn.respond("nightlife is not important")
+check("'nightlife is not important' -> acknowledged (not confused)", "nightlife" in ackn.lower() and "didn't" not in ackn.lower() and "not sure" not in ackn.lower())
+check("'nightlife is not important' -> nightlife kept low (weight 1), not excluded", b_ackn.query["lifestyle"].get("nightlife") == 1 and "nightlife" not in b_ackn.query["lifestyle_exclude"])
+check("ensure_nltk_data() still runs cleanly (now includes pos_tag)", (nlp.ensure_nltk_data() or True))
+print("=== 21. CONTEXT-AWARE 'I don't care' answers a slot question ===")
+def _budget_dontcare(msg):
+    b = TravelChatbot(dests); b.greeting()
+    b.pending_slot = "budget"
+    return b, b.respond(msg)
+for _msg in ["I dont care about costs", "the costs does not matter",
+             "it doesn't matter", "I don't care", "money doesnt matter"]:
+    b, r = _budget_dontcare(_msg)
+    check("'" + _msg + "' on budget slot -> budget de-emphasised (0.6)", b.query["importance"].get("budget") == 0.6)
+    check("'" + _msg + "' on budget slot -> budget question satisfied", b._slot_filled("budget"))
+    check("'" + _msg + "' on budget slot -> NOT a confused reply", "didn't" not in r.lower() and "not quite sure" not in r.lower() and "not sure i followed" not in r.lower())
+    check("'" + _msg + "' on budget slot -> no Budget value invented", b.query["budget"] == [] and b.query["budget_exclude"] == [])
+bc, _ = _budget_dontcare("I really dont care about the prices")
+check("'prices' is recognised as the budget criterion", bc.query["importance"].get("budget") == 0.6)
+bx = TravelChatbot(dests); bx.greeting(); bx.pending_slot = "budget"
+bx.respond("budget doesnt matter, I want luxury")
+check("'budget doesnt matter, want luxury' -> Luxury kept, budget de-emphasised", bx.query["budget"] == ["Luxury"] and bx.query["importance"].get("budget") == 0.6)
+bregion = TravelChatbot(dests); bregion.greeting()
+rr = bregion.respond("it doesnt matter")
+check("'it doesnt matter' on the region question -> skipped, not confused", "continent" in bregion.resolved and "didn't" not in rr.lower())
+print("=== 22. PROACTIVE RECOMMENDATION when all slots are gathered ===")
+CONFUSED_MARKERS = ("not quite sure", "didn't quite understand", "didn't catch", "not sure i followed")
+bp = TravelChatbot(dests); bp.greeting()
+for _t in ["south america", "in january", "a month", "the budget does not matter"]:
+    bp.respond(_t)
+final = bp.respond("a perfect weather for swim")
+check("small-talk-flagged completing message -> recommends", isinstance(final, dict) and final.get("type") == "recommendations")
+bs = TravelChatbot(dests); bs.greeting()
+last = None
+for _t in ["europe", "july", "one week", "mid-range", "warm", "i love culture and food"]:
+    last = bs.respond(_t)
+check("stepwise slot filling -> recommends on the final slot", isinstance(last, dict) and last.get("type") == "recommendations")
+ba = TravelChatbot(dests); ba.greeting()
+ba.respond("warm cheap europe culture beaches")
+ba.respond("skip all")
+filler = ba.respond("so")
+check("filler after recommendations -> not a confused reply", isinstance(filler, str) and not any(m in filler.lower() for m in CONFUSED_MARKERS))
+check("filler after recommendations -> offers refinement hints", "refine" in filler.lower() or "more like" in filler.lower() or "restart" in filler.lower())
+ref = ba.respond("i also love nightlife")
+check("a state-changing refinement after recs still recommends", isinstance(ref, dict) and ref.get("type") == "recommendations")
 print("=== SUMMARY ===")
 print("  passed:", PASSED, "| failed:", FAILED)
 if FAILED:

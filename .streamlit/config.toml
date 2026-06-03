@@ -1,0 +1,9 @@
+# Streamlit configuration for the Travel Destination Assistant.
+# "viewer" hides the developer-only items (Deploy button, "Clear cache",
+# "Record a screencast", "Developer options") while KEEPING the menu's Settings
+# entry — so the light/dark theme toggle, Print and About stay available.
+[client]
+toolbarMode = "viewer"
+
+[browser]
+gatherUsageStats = false

@@ -1,53 +1,17 @@
-# knowledge_base.py
-# ----------------------------------------------------------------------------
-# THE KNOWLEDGE BASE of our Knowledge-Based System (KBS).
-# Stores: (1) the travel city table loaded from CSV, (2) domain vocabulary
-# dictionaries mapping human words to dataset values, (3) a SEASON/MONTH
-# vocabulary so the bot can match monthly temperature instead of yearly average,
-# (4) NEW: a COUNTRY_SYNONYMS vocabulary so the user can name a specific country
-#     ("I want to go to Japan") and the bot pins results to that country exactly,
-#     mirroring the season/month pattern: keyword -> canonical country name,
-#     with a country_to_region() helper so inference can still do the region
-#     filter it already knows how to do.
-# ----------------------------------------------------------------------------
-import csv
 import json
 import os
-import pandas as pd    # replaces the built-in csv module for data loading
-
+import pandas as pd
 LIFESTYLE_DIMENSIONS = ["culture", "adventure", "nature", "beaches", "nightlife", "cuisine", "wellness", "urban", "seclusion"]
-
-# LIFESTYLE_DESCRIPTIONS: short keyword-rich text for each lifestyle dimension.
-# Used by the TF-IDF cosine similarity matcher in chatbot.py to detect which
-# dimensions the user is talking about from a free-text sentence, without
-# needing the user to use an exact vocabulary word. Each string covers the
-# typical words a traveller would use when describing that interest.
-LIFESTYLE_DESCRIPTIONS = {
-    # Each description includes the dimension name itself so that users who
-    # literally say "nightlife" or "culture" get a direct TF-IDF match,
-    # alongside related activity words for natural-language descriptions.
-    "culture":   "culture cultural history museums art architecture temples heritage monuments ancient traditions cathedral ruins gallery opera civilisation",
-    "adventure": "adventure adventurous hiking trekking outdoor extreme climbing surfing safari diving rafting kayaking skiing bungee paragliding expedition",
-    "nature":    "nature natural mountains forests wildlife landscape scenery national parks rivers waterfalls jungle volcano glacier canyon desert",
-    "beaches":   "beaches beach coast ocean swimming sunbathing sand islands seaside snorkeling sailing reef lagoon tropical shore",
-    "nightlife": "nightlife bars clubs dancing parties music entertainment drinks going out cocktails pub concert festival buzzing lively",
-    "cuisine":   "cuisine food restaurants local dishes street food eating wine culinary gastronomy market brunch seafood tasting cooking",
-    "wellness":  "wellness spa yoga relax relaxation meditation retreat massage calm peaceful rejuvenate hot springs mindfulness detox tranquil",
-    "urban":     "urban city shopping skyline modern metropolitan cosmopolitan downtown trendy rooftop street art skyscrapers hip fashionable",
-    "seclusion": "seclusion secluded quiet remote isolated peaceful private off beaten path rural hidden undiscovered solitude escape untouched",
-}
 REGIONS = ["europe", "asia", "africa", "north_america", "south_america", "oceania", "middle_east"]
 BUDGET_LEVELS = ["Budget", "Mid-range", "Luxury"]
 DURATIONS = ["Day trip", "Weekend", "Short trip", "One week", "Long trip"]
 CLIMATES = ["cold", "mild", "warm"]
-
-# Month numbers for each season / month name, used by the season slot.
 SEASON_MONTHS = {
-    "winter":    [12, 1, 2],
-    "spring":    [3, 4, 5],
-    "summer":    [6, 7, 8],
-    "autumn":    [9, 10, 11],
-    "fall":      [9, 10, 11],
+    "winter": [12, 1, 2],
+    "spring": [3, 4, 5],
+    "summer": [6, 7, 8],
+    "autumn": [9, 10, 11],
+    "fall": [9, 10, 11],
 }
 MONTH_NUMBER = {
     "january": 1, "february": 2, "march": 3, "april": 4,
@@ -57,12 +21,7 @@ MONTH_NUMBER = {
     "jun": 6, "jul": 7, "aug": 8,
     "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 }
-
-# NEW: which region each dataset country belongs to.
-# Used by country_to_region() so the inference engine can apply its existing
-# region filter whenever the user names a specific country.
 COUNTRY_REGION = {
-    # Europe
     "Albania": "europe", "Austria": "europe", "Belarus": "europe",
     "Belgium": "europe", "Bosnia and Herzegovina": "europe", "Bulgaria": "europe",
     "Croatia": "europe", "Cyprus": "europe", "Czech Republic": "europe",
@@ -78,7 +37,6 @@ COUNTRY_REGION = {
     "Serbia": "europe", "Slovakia": "europe", "Slovenia": "europe",
     "Spain": "europe", "Sweden": "europe", "Switzerland": "europe",
     "Ukraine": "europe", "United Kingdom": "europe",
-    # Asia
     "Azerbaijan": "asia", "Bangladesh": "asia", "Bhutan": "asia",
     "Cambodia": "asia", "China": "asia", "Hong Kong": "asia",
     "India": "asia", "Indonesia": "asia", "Japan": "asia",
@@ -89,7 +47,6 @@ COUNTRY_REGION = {
     "South Korea": "asia", "Sri Lanka": "asia", "Taiwan": "asia",
     "Tajikistan": "asia", "Thailand": "asia", "Turkmenistan": "asia",
     "Uzbekistan": "asia", "Vietnam": "asia",
-    # Africa
     "Angola": "africa", "Benin": "africa", "Botswana": "africa",
     "Burundi": "africa", "Cameroon": "africa", "Cape Verde": "africa",
     "Comoros": "africa", "Egypt": "africa", "Equatorial Guinea": "africa",
@@ -103,7 +60,6 @@ COUNTRY_REGION = {
     "South Africa": "africa", "Tanzania": "africa", "Togo": "africa",
     "Tunisia": "africa", "Uganda": "africa", "Zambia": "africa",
     "Zimbabwe": "africa", "Republic of the Congo": "africa",
-    # North America
     "Barbados": "north_america", "Belize": "north_america",
     "Bermuda": "north_america", "Canada": "north_america",
     "Cook Islands": "north_america", "Costa Rica": "north_america",
@@ -116,7 +72,6 @@ COUNTRY_REGION = {
     "Saint Kitts and Nevis": "north_america", "Saint Lucia": "north_america",
     "Trinidad and Tobago": "north_america", "Turks and Caicos": "north_america",
     "U.S. Virgin Islands": "north_america", "United States": "north_america",
-    # South America
     "Argentina": "south_america", "Bolivia": "south_america",
     "Brazil": "south_america", "Chile": "south_america",
     "Colombia": "south_america", "Ecuador": "south_america",
@@ -124,14 +79,12 @@ COUNTRY_REGION = {
     "Paraguay": "south_america", "Peru": "south_america",
     "Suriname": "south_america", "Uruguay": "south_america",
     "Venezuela": "south_america",
-    # Oceania
     "American Samoa": "oceania", "Australia": "oceania",
     "Fiji": "oceania", "New Caledonia": "oceania",
     "New Zealand": "oceania", "Papua New Guinea": "oceania",
     "Samoa": "oceania", "Solomon Islands": "oceania",
     "Tonga": "oceania", "Tuvalu": "oceania", "Vanuatu": "oceania",
     "French Polynesia": "oceania",
-    # Middle East
     "Bahrain": "middle_east", "Georgia": "middle_east",
     "Iran": "middle_east", "Iraq": "middle_east",
     "Israel": "middle_east", "Jordan": "middle_east",
@@ -140,15 +93,7 @@ COUNTRY_REGION = {
     "Saudi Arabia": "middle_east", "Turkey": "middle_east",
     "United Arab Emirates": "middle_east",
 }
-
-# NEW: COUNTRY_SYNONYMS maps user keywords -> canonical country name (as it
-# appears in the dataset's "country" column). Pattern mirrors SEASON_SYNONYMS:
-# keyword -> canonical value. country_to_region() then resolves to region.
-# No spellcheck on country names (same reason as season: short exact words
-# are safer). Adjectives, demonyms, capitals, and common abbreviations are
-# included so "japanese", "tokyo", "jp" all resolve to "Japan".
 COUNTRY_SYNONYMS = {
-    # Europe
     "albania": "Albania", "albanian": "Albania",
     "austria": "Austria", "austrian": "Austria", "vienna": "Austria",
     "belarus": "Belarus", "belarusian": "Belarus", "minsk": "Belarus",
@@ -195,7 +140,6 @@ COUNTRY_SYNONYMS = {
     "united kingdom": "United Kingdom", "british": "United Kingdom",
     "england": "United Kingdom", "london": "United Kingdom", "scotland": "United Kingdom",
     "edinburgh": "United Kingdom", "wales": "United Kingdom",
-    # Asia
     "azerbaijan": "Azerbaijan", "azerbaijani": "Azerbaijan", "baku": "Azerbaijan",
     "bangladesh": "Bangladesh", "bangladeshi": "Bangladesh", "dhaka": "Bangladesh",
     "bhutan": "Bhutan", "bhutanese": "Bhutan", "thimphu": "Bhutan",
@@ -225,7 +169,6 @@ COUNTRY_SYNONYMS = {
     "turkmenistan": "Turkmenistan", "ashgabat": "Turkmenistan",
     "uzbekistan": "Uzbekistan", "uzbek": "Uzbekistan", "tashkent": "Uzbekistan", "samarkand": "Uzbekistan",
     "vietnam": "Vietnam", "vietnamese": "Vietnam", "hanoi": "Vietnam", "ho chi minh": "Vietnam", "hoi an": "Vietnam",
-    # Africa
     "angola": "Angola", "angolan": "Angola", "luanda": "Angola",
     "benin": "Benin", "beninese": "Benin", "cotonou": "Benin",
     "botswana": "Botswana", "gaborone": "Botswana",
@@ -263,7 +206,6 @@ COUNTRY_SYNONYMS = {
     "zambia": "Zambia", "lusaka": "Zambia",
     "zimbabwe": "Zimbabwe", "harare": "Zimbabwe",
     "republic of the congo": "Republic of the Congo", "brazzaville": "Republic of the Congo",
-    # North America
     "barbados": "Barbados", "bridgetown": "Barbados",
     "belize": "Belize", "belmopan": "Belize",
     "bermuda": "Bermuda",
@@ -289,7 +231,6 @@ COUNTRY_SYNONYMS = {
     "united states": "United States", "usa": "United States",
     "new york": "United States", "nyc": "United States", "los angeles": "United States",
     "chicago": "United States", "miami": "United States", "las vegas": "United States",
-    # South America
     "argentina": "Argentina", "argentine": "Argentina", "buenos aires": "Argentina",
     "bolivia": "Bolivia", "la paz": "Bolivia",
     "brazil": "Brazil", "brazilian": "Brazil", "rio": "Brazil", "sao paulo": "Brazil",
@@ -303,7 +244,6 @@ COUNTRY_SYNONYMS = {
     "suriname": "Suriname", "paramaribo": "Suriname",
     "uruguay": "Uruguay", "montevideo": "Uruguay",
     "venezuela": "Venezuela", "venezuelan": "Venezuela", "caracas": "Venezuela",
-    # Oceania
     "american samoa": "American Samoa",
     "australia": "Australia", "australian": "Australia", "sydney": "Australia", "melbourne": "Australia",
     "fiji": "Fiji", "fijian": "Fiji", "suva": "Fiji",
@@ -316,7 +256,6 @@ COUNTRY_SYNONYMS = {
     "tuvalu": "Tuvalu", "funafuti": "Tuvalu",
     "vanuatu": "Vanuatu", "port vila": "Vanuatu",
     "french polynesia": "French Polynesia", "tahiti": "French Polynesia", "bora bora": "French Polynesia",
-    # Middle East
     "bahrain": "Bahrain", "manama": "Bahrain",
     "georgia": "Georgia", "tbilisi": "Georgia",
     "iran": "Iran", "iranian": "Iran", "tehran": "Iran",
@@ -332,21 +271,16 @@ COUNTRY_SYNONYMS = {
     "united arab emirates": "United Arab Emirates", "uae": "United Arab Emirates",
     "dubai": "United Arab Emirates", "abu dhabi": "United Arab Emirates",
 }
-
-
 def yearly_avg_temp(avg_temp_monthly):
     monthly_avgs = [month["avg"] for month in avg_temp_monthly.values()]
     return sum(monthly_avgs) / len(monthly_avgs)
-
 def climate_label(yearly):
     if yearly < 15:
         return "cold"
     if yearly < 22:
         return "mild"
     return "warm"
-
 def seasonal_avg_temp(avg_temp_monthly, months):
-    """Return the average temperature across the given list of month numbers."""
     avgs = []
     for m in months:
         key = str(m)
@@ -355,66 +289,38 @@ def seasonal_avg_temp(avg_temp_monthly, months):
     if not avgs:
         return None
     return sum(avgs) / len(avgs)
-
-
-# ----------------------------------------------------------------------------
-# EXTRA DATA HELPERS — these read columns we already have (monthly min/max/avg
-# temperatures and latitude) to let the chatbot give richer, data-backed answers
-# such as "best time to visit", the warmest/coldest month, the typical day/night
-# range, and which hemisphere a city is in. No new data is invented; we only
-# summarise what is already in the Knowledge Base.
-# ----------------------------------------------------------------------------
 _MONTH_ABBR = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
                7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
-
-
 def warmest_month(avg_temp_monthly):
-    """Return (month_number, avg_temp) for the hottest month, or None if no data."""
     best = None
     for k, v in avg_temp_monthly.items():
         if best is None or v["avg"] > best[1]:
             best = (int(k), v["avg"])
     return best
-
-
 def coldest_month(avg_temp_monthly):
-    """Return (month_number, avg_temp) for the coldest month, or None if no data."""
     best = None
     for k, v in avg_temp_monthly.items():
         if best is None or v["avg"] < best[1]:
             best = (int(k), v["avg"])
     return best
-
-
 def comfortable_months(avg_temp_monthly, low=18.0, high=30.0):
-    """Month numbers whose AVERAGE temperature sits in a pleasant band (18-30C
-    by default). This is our data-driven 'best time to visit' for warm-weather
-    travel."""
     out = []
     for k, v in avg_temp_monthly.items():
         if low <= v["avg"] <= high:
             out.append(int(k))
     return sorted(out)
-
-
 def format_month_ranges(months):
-    """Turn a list of month numbers into a compact human string, collapsing runs
-    into ranges and joining the calendar wrap-around (Dec->Jan). Examples:
-    [5,6,7,8,9,10] -> 'May-Oct'; [1,2,12] -> 'Dec-Feb'; [4] -> 'Apr'."""
     months = sorted(set(months))
     if not months:
         return ""
     if len(months) == 12:
         return "all year round"
-    # Wrap-around: if both January and December are present, rotate the list so a
-    # winter run reads naturally (e.g. Dec-Feb instead of Jan-Feb + Dec).
     if 1 in months and 12 in months:
         shifted = [m for m in months if m >= 7] + [m for m in months if m < 7]
         months = shifted
     runs = []
     start = prev = months[0]
     for m in months[1:]:
-        # Consecutive in calendar order (with Dec->Jan treated as consecutive).
         if m == prev + 1 or (prev == 12 and m == 1):
             prev = m
             continue
@@ -425,50 +331,32 @@ def format_month_ranges(months):
     for a, b in runs:
         parts.append(_MONTH_ABBR[a] if a == b else _MONTH_ABBR[a] + "-" + _MONTH_ABBR[b])
     return ", ".join(parts)
-
-
 def hemisphere(latitude):
-    """'southern' for cities below the equator (seasons flipped), else 'northern'."""
     try:
         return "southern" if float(latitude) < 0 else "northern"
     except (TypeError, ValueError):
         return "northern"
-
 def load_destinations(csv_path=None):
-    # REWRITE: use pandas.read_csv() instead of csv.DictReader + for-loop.
     if csv_path is None:
         here = os.path.dirname(os.path.abspath(__file__))
         csv_path = os.path.join(here, "Worldwide Travel Cities Dataset (Ratings and Climate).csv")
     df = pd.read_csv(csv_path)
     df["avg_temp_monthly"] = df["avg_temp_monthly"].apply(json.loads)
-    df["ideal_durations"]  = df["ideal_durations"].apply(json.loads)
+    df["ideal_durations"] = df["ideal_durations"].apply(json.loads)
     for dim in LIFESTYLE_DIMENSIONS:
         df[dim] = df[dim].astype(int)
     df["avg_temp_yearly"] = df["avg_temp_monthly"].apply(lambda m: round(yearly_avg_temp(m), 1))
-    df["climate"]         = df["avg_temp_yearly"].apply(climate_label)
+    df["climate"] = df["avg_temp_yearly"].apply(climate_label)
     return df.to_dict(orient="records")
-
 def country_to_region(country_name):
-    """Return the region for a canonical country name, or None if unknown."""
     return COUNTRY_REGION.get(country_name)
-
 def season_to_months(season_key):
-    """Convert a season/month key to a list of month numbers."""
     if season_key in SEASON_MONTHS:
         return SEASON_MONTHS[season_key]
     if season_key in MONTH_NUMBER:
         return [MONTH_NUMBER[season_key]]
     return []
-
-# ----------------------------------------------------------------------------
-# DOMAIN VOCABULARY
-# ----------------------------------------------------------------------------
-
 CONTINENT_SYNONYMS = {
-    # Pure region/continent keywords only.
-    # Country names, city names, and demonyms have been moved to COUNTRY_SYNONYMS
-    # so that a token like 'japan' only ever matches one vocabulary.
-    # Europe
     "balkan": "europe",
     "balkans": "europe",
     "britain": "europe",
@@ -482,7 +370,6 @@ CONTINENT_SYNONYMS = {
     "scottish": "europe",
     "uk": "europe",
     "welsh": "europe",
-    # Asia
     "asia": "asia",
     "asian": "asia",
     "chiangmai": "asia",
@@ -496,7 +383,6 @@ CONTINENT_SYNONYMS = {
     "south asia": "asia",
     "southeast asia": "asia",
     "southeastasia": "asia",
-    # Africa
     "africa": "africa",
     "african": "africa",
     "lagos": "africa",
@@ -505,7 +391,6 @@ CONTINENT_SYNONYMS = {
     "north africa": "africa",
     "southafrica": "africa",
     "sub-saharan": "africa",
-    # North America
     "america": "north_america",
     "american": "north_america",
     "boston": "north_america",
@@ -527,7 +412,6 @@ CONTINENT_SYNONYMS = {
     "seattle": "north_america",
     "unitedstates": "north_america",
     "us": "north_america",
-    # South America
     "latin": "south_america",
     "latin america": "south_america",
     "latinamerica": "south_america",
@@ -535,14 +419,12 @@ CONTINENT_SYNONYMS = {
     "south": "south_america",
     "south america": "south_america",
     "southamerica": "south_america",
-    # Oceania
     "brisbane": "oceania",
     "new zealand": "oceania",
     "newzealand": "oceania",
     "oceania": "oceania",
     "pacific": "oceania",
     "perth": "oceania",
-    # Middle East
     "arabian": "middle_east",
     "arabic": "middle_east",
     "emirates": "middle_east",
@@ -550,12 +432,12 @@ CONTINENT_SYNONYMS = {
     "middle east": "middle_east",
     "middleeast": "middle_east",
 }
-
 BUDGET_SYNONYMS = {
-    # Budget
     "cheap": "Budget", "cheaper": "Budget", "cheapest": "Budget",
     "affordable": "Budget", "afford": "Budget",
-    "budget": "Budget", "budgetfriendly": "Budget", "budget-friendly": "Budget",
+    "on a budget": "Budget", "low budget": "Budget", "tight budget": "Budget",
+    "budget trip": "Budget", "budget travel": "Budget", "budget friendly": "Budget",
+    "budgetfriendly": "Budget", "budget-friendly": "Budget",
     "inexpensive": "Budget", "low": "Budget", "economical": "Budget", "economic": "Budget",
     "frugal": "Budget", "broke": "Budget", "tight": "Budget",
     "shoestring": "Budget", "backpacker": "Budget", "backpacking": "Budget",
@@ -563,13 +445,11 @@ BUDGET_SYNONYMS = {
     "value": "Budget", "wallet": "Budget", "saving": "Budget", "savings": "Budget",
     "cost-effective": "Budget", "costeffective": "Budget", "no frills": "Budget",
     "basic": "Budget", "simple": "Budget",
-    # Mid-range
     "moderate": "Mid-range", "mid": "Mid-range", "midrange": "Mid-range", "mid-range": "Mid-range",
     "medium": "Mid-range", "average": "Mid-range", "normal": "Mid-range",
     "reasonable": "Mid-range", "standard": "Mid-range", "decent": "Mid-range",
     "comfortable": "Mid-range", "middleground": "Mid-range", "balanced": "Mid-range",
     "fair": "Mid-range", "regular": "Mid-range",
-    # Luxury
     "luxury": "Luxury", "luxurious": "Luxury",
     "expensive": "Luxury", "pricier": "Luxury", "pricey": "Luxury", "premium": "Luxury",
     "high": "Luxury", "lavish": "Luxury", "fancy": "Luxury",
@@ -580,58 +460,39 @@ BUDGET_SYNONYMS = {
     "top-tier": "Luxury", "toptier": "Luxury", "first-class": "Luxury", "firstclass": "Luxury",
     "five stars": "Luxury",
 }
-
 DURATION_SYNONYMS = {
-    # Day trip
     "day": "Day trip", "daytrip": "Day trip", "day-trip": "Day trip",
     "daylong": "Day trip", "one-day": "Day trip", "1 day": "Day trip",
-    # Weekend
     "overnight": "Weekend", "weekend": "Weekend", "getaway": "Weekend",
     "two days": "Weekend", "2 days": "Weekend", "two-day": "Weekend",
-    # Short trip
     "short": "Short trip", "few": "Short trip", "quick": "Short trip",
     "couple": "Short trip", "mini": "Short trip", "brief": "Short trip",
     "few days": "Short trip", "3 days": "Short trip", "4 days": "Short trip", "5 days": "Short trip",
-    # One week
     "week": "One week", "weekly": "One week", "weeklong": "One week", "week-long": "One week",
     "seven days": "One week", "7 days": "One week", "1 week": "One week",
-    # Long trip
     "long": "Long trip", "extended": "Long trip", "month": "Long trip",
     "monthlong": "Long trip", "fortnight": "Long trip", "two weeks": "Long trip",
     "2 weeks": "Long trip", "3 weeks": "Long trip", "several weeks": "Long trip",
     "gap year": "Long trip", "sabbatical": "Long trip",
 }
-
 CLIMATE_SYNONYMS = {
-    # Warm
     "warm": "warm", "warmer": "warm", "hot": "warm", "hotter": "warm", "tropical": "warm",
     "sunny": "warm", "sun": "warm", "sunshine": "warm", "sunny day": "warm",
     "heat": "warm", "scorching": "warm", "boiling": "warm",
     "humid": "warm", "sweltering": "warm", "blazing": "warm",
     "beach weather": "warm", "swimwear": "warm", "tanning": "warm",
-    # Vague-but-positive "I want nice weather" phrasings. In a holiday/swim
-    # context these almost always mean warm and sunny, so we map them to warm
-    # (pairs naturally with beach/swim preferences).
     "warm weather": "warm", "good weather": "warm", "nice weather": "warm",
     "lovely weather": "warm", "great weather": "warm", "beautiful weather": "warm",
     "perfect weather": "warm", "sunny weather": "warm", "hot weather": "warm",
-    # Mild
     "mild": "mild", "milder": "mild", "temperate": "mild",
     "pleasant": "mild", "moderate temperature": "mild", "comfortable weather": "mild",
     "not too hot": "mild", "not too cold": "mild", "in between": "mild",
-    # Cold
     "cold": "cold", "colder": "cold", "cool": "cold", "cooler": "cold", "chilly": "cold",
     "snowy": "cold", "snow": "cold",
     "freezing": "cold", "frosty": "cold", "icy": "cold",
     "crisp": "cold", "brisk": "cold", "arctic": "cold",
-    # NOTE: season words (summer/winter/spring/autumn/fall) are intentionally
-    # absent here. They live only in SEASON_SYNONYMS and set travel_months.
-    # Climate inference from season words leads to false positives: "summer in
-    # Japan" should set months, not automatically infer warm climate preference.
 }
-
 LIFESTYLE_SYNONYMS = {
-    # Culture
     "culture": "culture", "cultural": "culture",
     "history": "culture", "historical": "culture", "historic": "culture",
     "heritage": "culture", "museum": "culture", "museums": "culture",
@@ -644,7 +505,6 @@ LIFESTYLE_SYNONYMS = {
     "cathedral": "culture", "cathedrals": "culture", "churches": "culture", "church": "culture",
     "local culture": "culture", "theater": "culture", "theatre": "culture",
     "opera": "culture", "classical": "culture", "civilisation": "culture", "civilization": "culture",
-    # Adventure
     "adventure": "adventure", "adventurous": "adventure",
     "hiking": "adventure", "hike": "adventure", "hikes": "adventure",
     "trekking": "adventure", "trek": "adventure", "treks": "adventure",
@@ -661,7 +521,6 @@ LIFESTYLE_SYNONYMS = {
     "skiing": "adventure", "ski": "adventure", "snowboarding": "adventure",
     "camping": "adventure", "expedition": "adventure",
     "off-road": "adventure", "offroad": "adventure",
-    # Nature
     "nature": "nature", "natural": "nature",
     "mountain": "nature", "mountains": "nature",
     "forest": "nature", "forests": "nature", "jungle": "nature",
@@ -677,7 +536,6 @@ LIFESTYLE_SYNONYMS = {
     "volcano": "nature", "volcanoes": "nature",
     "glacier": "nature", "canyon": "nature", "desert": "nature",
     "botanical": "nature", "flora": "nature", "fauna": "nature",
-    # Beaches
     "beach": "beaches", "beaches": "beaches",
     "coast": "beaches", "coastal": "beaches",
     "sea": "beaches", "seaside": "beaches",
@@ -691,7 +549,6 @@ LIFESTYLE_SYNONYMS = {
     "sailing": "beaches", "windsurfing": "beaches",
     "tropical beach": "beaches", "white sand": "beaches",
     "lagoon": "beaches", "reef": "beaches", "coral": "beaches",
-    # Nightlife
     "nightlife": "nightlife",
     "party": "nightlife", "parties": "nightlife", "partying": "nightlife",
     "club": "nightlife", "clubs": "nightlife", "clubbing": "nightlife",
@@ -703,7 +560,6 @@ LIFESTYLE_SYNONYMS = {
     "live music": "nightlife", "concert": "nightlife",
     "entertainment": "nightlife", "buzzing": "nightlife",
     "lively": "nightlife", "vibrant": "nightlife",
-    # Cuisine
     "cuisine": "cuisine", "food": "cuisine", "foodie": "cuisine",
     "gastronomy": "cuisine", "culinary": "cuisine",
     "eating": "cuisine", "eat": "cuisine",
@@ -718,7 +574,6 @@ LIFESTYLE_SYNONYMS = {
     "market": "cuisine", "food market": "cuisine",
     "vegan": "cuisine", "vegetarian": "cuisine",
     "seafood": "cuisine", "sushi": "cuisine", "pizza": "cuisine", "tacos": "cuisine",
-    # Wellness
     "wellness": "wellness", "spa": "wellness",
     "relax": "wellness", "relaxation": "wellness", "relaxing": "wellness",
     "calm": "wellness", "yoga": "wellness",
@@ -729,7 +584,6 @@ LIFESTYLE_SYNONYMS = {
     "rejuvenate": "wellness", "recharge": "wellness",
     "hot spring": "wellness", "hot springs": "wellness", "thermal": "wellness",
     "detox": "wellness", "mindfulness": "wellness",
-    # Urban
     "urban": "urban", "city": "urban",
     "metropolitan": "urban", "metropolis": "urban",
     "modern": "urban", "shopping": "urban",
@@ -739,7 +593,6 @@ LIFESTYLE_SYNONYMS = {
     "hip": "urban", "trendy": "urban", "fashionable": "urban",
     "rooftop": "urban", "street art": "urban",
     "markets": "urban", "bazaar": "urban",
-    # Seclusion
     "seclusion": "seclusion", "secluded": "seclusion",
     "quiet": "seclusion", "peaceful": "seclusion",
     "isolated": "seclusion", "remote": "seclusion",
@@ -750,20 +603,15 @@ LIFESTYLE_SYNONYMS = {
     "escape": "seclusion", "off the beaten path": "seclusion",
     "getaway": "seclusion", "undiscovered": "seclusion",
     "rural": "seclusion", "countryside": "seclusion",
-    # Sports -> adventure
     "sports": "adventure", "sport": "adventure",
     "active": "adventure", "activities": "adventure", "activity": "adventure",
     "physical": "adventure",
 }
-
-# Season / month vocabulary  ->  canonical key used by chatbot + inference
 SEASON_SYNONYMS = {
-    # Seasons
     "winter": "winter", "wintry": "winter", "wintertime": "winter",
     "spring": "spring", "springtime": "spring",
     "summer": "summer", "summertime": "summer",
     "autumn": "autumn", "fall": "autumn",
-    # Month names
     "january": "january", "jan": "january",
     "february": "february", "feb": "february",
     "march": "march", "mar": "march",
@@ -776,7 +624,6 @@ SEASON_SYNONYMS = {
     "october": "october", "oct": "october",
     "november": "november", "nov": "november",
     "december": "december", "dec": "december",
-    # Informal
     "xmas": "december", "christmas": "december",
     "new year": "january", "newyear": "january",
     "easter": "march",
